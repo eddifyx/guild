@@ -1,0 +1,40 @@
+{
+  "name": "byzantine",
+  "version": "1.0.35",
+  "private": true,
+  "description": "/guild encrypted messenger",
+  "author": "/guild",
+  "main": ".vite/build/main.js",
+  "scripts": {
+    "start": "electron-forge start",
+    "package": "electron-forge package",
+    "make": "electron-forge make"
+  },
+  "dependencies": {
+    "@noble/ciphers": "^1.2.0",
+    "@noble/curves": "^1.8.0",
+    "@noble/hashes": "^1.7.0",
+    "@signalapp/libsignal-client": "^0.88.1",
+    "better-sqlite3": "^12.6.2",
+    "date-fns": "^3.3.1",
+    "deepfilternet3-noise-filter": "^1.2.1",
+    "geist": "^1.7.0",
+    "mediasoup-client": "^3.18.7",
+    "nostr-tools": "^2.23.2",
+    "qrcode.react": "^4.2.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "socket.io-client": "^4.7.4"
+  },
+  "devDependencies": {
+    "@electron-forge/cli": "^7.2.0",
+    "@electron-forge/maker-deb": "^7.2.0",
+    "@electron-forge/maker-dmg": "^7.2.0",
+    "@electron-forge/maker-zip": "^7.2.0",
+    "@electron-forge/plugin-vite": "^7.2.0",
+    "@electron/rebuild": "^3.7.2",
+    "@vitejs/plugin-react": "^4.2.1",
+    "electron": "^28.3.3",
+    "vite": "^5.1.0"
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "name": "messenger-app",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": [
+    "server",
+    "client"
+  ],
+  "scripts": {
+    "dev:server": "cd server && npm run dev",
+    "dev:client": "cd client && npm start",
+    "start:server": "cd server && npm start",
+    "dev:client:a": "node scripts/start-client-profile.js A",
+    "dev:client:b": "node scripts/start-client-profile.js B",
+    "dev:client:profile": "node scripts/start-client-profile.js",
+    "dev:client:c": "node scripts/start-client-profile.js C"
+  }
+}
