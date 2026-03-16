@@ -1,7 +1,7 @@
 {
   "name": "guild",
   "productName": "guild",
-  "version": "1.0.40",
+  "version": "1.0.41",
   "private": true,
   "description": "/guild encrypted messenger",
   "author": "/guild",
@@ -11,6 +11,7 @@
     "package": "electron-forge package",
     "make": "electron-forge make",
     "make:mac-release": "GUILD_MAC_SIGN=1 electron-forge make --platform=darwin --arch=arm64",
+    "make:mac-dmg": "bash scripts/build-mac-dmg.sh",
     "verify:mac-release": "node scripts/verify-mac-release-env.js"
   },
   "dependencies": {

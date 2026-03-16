@@ -7,6 +7,7 @@ const {
   renameRoom, deleteRoomRow, deleteRoomMembers, deleteRoomAttachments, deleteRoomMessages,
   getAllUsers, isGuildMember, getGuildMembers,
   getPendingSenderKeyDistributionsForRecipientInRoom,
+  getRecentSenderKeyDistributionsForRecipientInRoom,
   acknowledgeSenderKeyDistributions,
   deleteSenderKeyDistributionsForRoom,
   deleteSenderKeyDistributionsForRecipientInRoom,
@@ -126,8 +127,13 @@ router.get('/:id/sender-keys', auth, (req, res) => {
   const member = isRoomMember.get(req.params.id, req.userId);
   if (!member) return res.status(403).json({ error: 'Not a member of this room' });
 
-  const pending = getPendingSenderKeyDistributionsForRecipientInRoom.all(req.userId, req.params.id);
-  res.json(pending.map((entry) => ({
+  const includeDelivered = req.query.includeDelivered === '1';
+  const recentLimit = Math.min(parseInt(req.query.limit, 10) || 32, 100);
+  const rows = includeDelivered
+    ? getRecentSenderKeyDistributionsForRecipientInRoom.all(req.userId, req.params.id, recentLimit).reverse()
+    : getPendingSenderKeyDistributionsForRecipientInRoom.all(req.userId, req.params.id);
+
+  res.json(rows.map((entry) => ({
     id: entry.id,
     roomId: entry.room_id,
     fromUserId: entry.sender_user_id,

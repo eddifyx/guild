@@ -1,7 +1,37 @@
+function normalizeServerUrl(rawUrl) {
+  return (rawUrl || '').trim().replace(/\/+$/, '');
+}
+
+function parseServerUrlList(rawValue) {
+  return String(rawValue || '')
+    .split(',')
+    .map(normalizeServerUrl)
+    .filter(Boolean);
+}
+
+const DEFAULT_CANONICAL_SERVER_URL = 'https://prod.82.221.100.187.sslip.io';
+const CANONICAL_SERVER_URL = normalizeServerUrl(import.meta.env.VITE_CANONICAL_SERVER_URL) || DEFAULT_CANONICAL_SERVER_URL;
+const KNOWN_LEGACY_SERVER_URLS = new Set([
+  'http://82.221.100.187',
+  'http://82.221.100.187:80',
+  'http://82.221.100.187:3001',
+  'http://prod.82.221.100.187.sslip.io',
+  'http://prod.82.221.100.187.sslip.io:80',
+  'http://prod.82.221.100.187.sslip.io:3001',
+  ...parseServerUrlList(import.meta.env.VITE_LEGACY_SERVER_URLS),
+].map(normalizeServerUrl));
+
+function migrateKnownProductionServerUrl(rawUrl) {
+  const normalized = normalizeServerUrl(rawUrl);
+  if (!normalized) return '';
+  return KNOWN_LEGACY_SERVER_URLS.has(normalized) ? CANONICAL_SERVER_URL : normalized;
+}
+
 /**
  * Returns true if a URL is a local/dev address (localhost, 127.0.0.1, 192.168.x.x, 10.x.x.x).
  */
-const PACKAGED_DEFAULT_SERVER_URL = (import.meta.env.VITE_DEFAULT_SERVER_URL || 'https://guild.app').replace(/\/+$/, '');
+const ENV_DEFAULT_SERVER_URL = migrateKnownProductionServerUrl(import.meta.env.VITE_DEFAULT_SERVER_URL || '');
+const PACKAGED_DEFAULT_SERVER_URL = ENV_DEFAULT_SERVER_URL || CANONICAL_SERVER_URL;
 const DEV_DEFAULT_SERVER_URL = 'http://localhost:3001';
 
 function isLocalUrl(url) {
@@ -20,10 +50,11 @@ export function isInsecureConnection() {
 
 export function setServerUrl(url) {
   // Auto-prepend http:// if no protocol specified
-  let normalized = (url || '').trim();
+  let normalized = normalizeServerUrl(url);
   if (normalized && !/^https?:\/\//i.test(normalized)) {
     normalized = 'http://' + normalized;
   }
+  normalized = migrateKnownProductionServerUrl(normalized);
   if (normalized && normalized.startsWith('http://') && !isLocalUrl(normalized)) {
     console.warn('[Security] Server URL uses unencrypted HTTP. Auth tokens and messages will be sent in plaintext. Use HTTPS in production.');
   }
@@ -31,8 +62,18 @@ export function setServerUrl(url) {
 }
 
 export function getServerUrl() {
-  const stored = localStorage.getItem('serverUrl');
-  if (stored) return stored;
+  const stored = migrateKnownProductionServerUrl(localStorage.getItem('serverUrl'));
+  if (stored) {
+    if (stored !== localStorage.getItem('serverUrl')) {
+      localStorage.setItem('serverUrl', stored);
+    }
+    return stored;
+  }
+  try {
+    const runtimeServerUrl = migrateKnownProductionServerUrl(new URLSearchParams(window.location.search).get('serverUrl'));
+    if (runtimeServerUrl) return runtimeServerUrl.replace(/\/+$/, '');
+  } catch {}
+  if (ENV_DEFAULT_SERVER_URL) return ENV_DEFAULT_SERVER_URL;
   return import.meta.env.DEV ? DEV_DEFAULT_SERVER_URL : PACKAGED_DEFAULT_SERVER_URL;
 }
 
@@ -203,7 +244,10 @@ export async function uploadFile(file) {
 export async function checkLatestVersion() {
   try {
     const localVersion = await window.electronAPI?.getAppVersion?.() || '0.0.0';
-    const platform = window.electronAPI?.getPlatform?.() || process.platform || 'unknown';
+    const platform = window.electronAPI?.getPlatformTarget?.()
+      || window.electronAPI?.getPlatform?.()
+      || process.platform
+      || 'unknown';
     const serverUrl = getServerUrl();
     const res = await fetch(`${serverUrl}/api/version?platform=${platform}&localVersion=${encodeURIComponent(localVersion)}`);
     if (!res.ok) {
@@ -214,6 +258,8 @@ export async function checkLatestVersion() {
         updateStrategy: 'native',
         downloadPageUrl: null,
         platformDownload: null,
+        releasedAt: null,
+        patchNotes: null,
       };
     }
     const payload = await res.json();
@@ -238,6 +284,8 @@ export async function checkLatestVersion() {
       manualInstallReason: payload?.manualInstallReason || null,
       downloadPageUrl: toAbsoluteServerUrl(payload?.downloadPageUrl, serverUrl),
       platformDownload,
+      releasedAt: payload?.releasedAt || null,
+      patchNotes: payload?.patchNotes || null,
     };
   } catch {
     return {
@@ -248,6 +296,8 @@ export async function checkLatestVersion() {
       manualInstallReason: null,
       downloadPageUrl: null,
       platformDownload: null,
+      releasedAt: null,
+      patchNotes: null,
     };
   }
 }

@@ -132,11 +132,14 @@ export default function VoiceChannelView({ channelId }) {
 
   const count = participants.length;
   const tier = count <= 4 ? 'large' : count <= 12 ? 'medium' : 'compact';
-  const secureVoiceState = e2eWarning
-    ? 'blocked'
-    : voiceE2E
-      ? 'ready'
-      : 'establishing';
+  const isJoinedToChannel = myChannelId === channelId;
+  const secureVoiceState = !isJoinedToChannel
+    ? null
+    : e2eWarning
+      ? 'blocked'
+      : voiceE2E
+        ? 'ready'
+        : 'establishing';
   const secureVoiceColor = secureVoiceState === 'blocked'
     ? 'var(--danger)'
     : secureVoiceState === 'ready'
@@ -173,7 +176,7 @@ export default function VoiceChannelView({ channelId }) {
         <span style={styles.connectedCount}>{count} connected</span>
       </div>
 
-      {e2eWarning && (
+      {isJoinedToChannel && e2eWarning && (
         <div style={styles.warningBanner}>
           {e2eWarning}
         </div>
@@ -199,36 +202,38 @@ export default function VoiceChannelView({ channelId }) {
         </div>
       </div>
 
-      <div style={styles.statusBar}>
-        <div style={styles.statusLeft}>
-          <div style={{
-            ...styles.statusDot,
-            background: secureVoiceColor,
-            boxShadow: secureVoiceState === 'ready'
-              ? '0 0 8px rgba(0, 214, 143, 0.4)'
-              : secureVoiceState === 'blocked'
-                ? '0 0 8px rgba(255, 71, 87, 0.4)'
-                : '0 0 8px rgba(64, 255, 64, 0.25)',
-          }} />
-          <span style={{ ...styles.statusText, color: secureVoiceColor }}>
-            {secureVoiceLabel}
-          </span>
-          <span style={styles.statusChannel}>{channelName}</span>
-        </div>
-        {secureVoiceState === 'ready' ? (
-          <div style={styles.e2eBadge}>
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
-              <path d="M7 11V7a5 5 0 0 1 10 0v4" />
-            </svg>
-            E2E Encrypted
+      {secureVoiceState && (
+        <div style={styles.statusBar}>
+          <div style={styles.statusLeft}>
+            <div style={{
+              ...styles.statusDot,
+              background: secureVoiceColor,
+              boxShadow: secureVoiceState === 'ready'
+                ? '0 0 8px rgba(0, 214, 143, 0.4)'
+                : secureVoiceState === 'blocked'
+                  ? '0 0 8px rgba(255, 71, 87, 0.4)'
+                  : '0 0 8px rgba(64, 255, 64, 0.25)',
+            }} />
+            <span style={{ ...styles.statusText, color: secureVoiceColor }}>
+              {secureVoiceLabel}
+            </span>
+            <span style={styles.statusChannel}>{channelName}</span>
           </div>
-        ) : secureVoiceState === 'establishing' ? (
-          <div style={styles.pendingBadge}>Negotiating secure media</div>
-        ) : (
-          <div style={styles.blockedBadge}>Secure media unavailable</div>
-        )}
-      </div>
+          {secureVoiceState === 'ready' ? (
+            <div style={styles.e2eBadge}>
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+                <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+              </svg>
+              E2E Encrypted
+            </div>
+          ) : secureVoiceState === 'establishing' ? (
+            <div style={styles.pendingBadge}>Negotiating secure media</div>
+          ) : (
+            <div style={styles.blockedBadge}>Secure media unavailable</div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

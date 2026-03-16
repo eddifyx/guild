@@ -8,7 +8,7 @@
  * sees plaintext and opaque ciphertext blobs.
  */
 
-const { app, safeStorage } = require('electron');
+const { app } = require('electron');
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
@@ -33,10 +33,10 @@ let userId = null;
 
 // ---------------------------------------------------------------------------
 // Master key management.
-// Preferred path: Electron safeStorage → OS keychain.
-// Fallback path: app-local base64 file when keychain access is denied/unavailable.
-// This preserves login/E2EE functionality without forcing a keychain approval
-// dialog, at the cost of weaker at-rest protection on that device.
+// Runtime builds intentionally avoid Electron safeStorage / OS keychain.
+// The Signal master key is persisted only to an app-local base64 file.
+// If we detect a legacy keychain-backed file from older builds, we rotate
+// to app-local storage and reset the local Signal store once.
 // ---------------------------------------------------------------------------
 
 function _encryptedMasterKeyPath(uid) {
@@ -54,14 +54,6 @@ function _protocolStorePaths(uid) {
     `${dbPath}-wal`,
     `${dbPath}-shm`,
   ];
-}
-
-function isSafeStorageUsable() {
-  try {
-    return safeStorage.isEncryptionAvailable();
-  } catch {
-    return false;
-  }
 }
 
 function generateMasterKeyBase64() {
@@ -87,8 +79,7 @@ function getMasterKey(uid) {
   const encryptedPath = _encryptedMasterKeyPath(uid);
   const fallbackPath = _fallbackMasterKeyPath(uid);
 
-  // Once a fallback file exists, keep using it so we don't bounce between
-  // secure and non-secure stores across launches.
+  // Once the app-local file exists, keep using it across launches.
   if (fs.existsSync(fallbackPath)) {
     return {
       keyBase64: fs.readFileSync(fallbackPath, 'utf8').trim(),
@@ -98,21 +89,7 @@ function getMasterKey(uid) {
   }
 
   if (fs.existsSync(encryptedPath)) {
-    if (isSafeStorageUsable()) {
-      try {
-        const encrypted = fs.readFileSync(encryptedPath);
-        return {
-          keyBase64: safeStorage.decryptString(encrypted),
-          storage: 'secure',
-          requiresStoreReset: false,
-        };
-      } catch (error) {
-        console.warn('[Signal] Failed to read OS-keychain-backed master key; falling back to local storage:', error);
-      }
-    } else {
-      console.warn('[Signal] OS keychain unavailable; falling back to local Signal key storage for this device.');
-    }
-
+    console.warn('[Signal] Legacy OS-keychain-backed master key detected. Rotating Signal state to app-local storage.');
     return {
       keyBase64: ensureFallbackMasterKey(uid),
       storage: 'fallback-recovery',
@@ -120,23 +97,8 @@ function getMasterKey(uid) {
     };
   }
 
-  // Generate new master key and persist it via the best available local path.
+  // Generate a new master key and persist it via the app-local path.
   const mkB64 = generateMasterKeyBase64();
-
-  if (isSafeStorageUsable()) {
-    try {
-      const encrypted = safeStorage.encryptString(mkB64);
-      fs.writeFileSync(encryptedPath, encrypted);
-      return {
-        keyBase64: mkB64,
-        storage: 'secure',
-        requiresStoreReset: false,
-      };
-    } catch (error) {
-      console.warn('[Signal] Failed to persist OS-keychain-backed master key; using local fallback storage instead:', error);
-    }
-  }
-
   writeFallbackMasterKey(fallbackPath, mkB64);
   return {
     keyBase64: mkB64,
@@ -254,14 +216,13 @@ function registerSignalHandlers(ipcMain) {
       } catch (error) {
         const canRecoverByResettingStore =
           !resetAttempted &&
-          masterKeyState.storage !== 'secure' &&
           (masterKeyState.requiresStoreReset || shouldResetProtocolStore(error));
 
         if (!canRecoverByResettingStore) {
           throw error;
         }
 
-        console.warn('[Signal] Resetting local Signal store after secure-storage denial or unreadable encrypted state:', error);
+        console.warn('[Signal] Resetting local Signal store after legacy keychain migration or unreadable local state:', error);
         resetAttempted = true;
 
         if (store) {

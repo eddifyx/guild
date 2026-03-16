@@ -1599,7 +1599,7 @@ export default function LoginScreen({ onLoginSuccess }) {
                 color: 'rgba(255, 255, 255, 0.3)',
                 fontSize: 11, marginBottom: 16, lineHeight: 1.5,
               }}>
-                /guild never sends your raw key off this machine. If secure storage is available, it encrypts and saves the key locally for future sign-ins. If not, the key stays only for this session and is not saved after restart.
+                /guild never sends your raw key off this machine. Private-key logins stay in memory only for this session and are cleared when the app closes. Use QR with Amber or another remote signer whenever possible.
               </p>
 
               {error && (

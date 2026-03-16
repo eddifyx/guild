@@ -12,3 +12,18 @@ guild.example.com {
     X-Content-Type-Options "nosniff"
   }
 }
+
+staging.guild.example.com {
+  encode gzip zstd
+
+  reverse_proxy 127.0.0.1:3002 {
+    header_up X-Forwarded-Proto {scheme}
+    header_up X-Forwarded-For {remote_host}
+    header_up X-Forwarded-Host {host}
+  }
+
+  header {
+    Strict-Transport-Security "max-age=31536000; includeSubDomains"
+    X-Content-Type-Options "nosniff"
+  }
+}

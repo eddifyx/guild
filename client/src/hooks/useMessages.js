@@ -492,7 +492,11 @@ async function tryDecryptMessage(msg, userId, retryState = null, options = {}) {
       } catch (retryErr) {
         const senderKeyArrived = await waitForSenderKeyUpdate(msg.room_id);
         const recoveredFromStorage = senderKeyArrived ? false : (await syncRoomSenderKeys(msg.room_id)) > 0;
-        if (senderKeyArrived || recoveredFromStorage) {
+        const recoveredFromDeliveredHistory = (senderKeyArrived || recoveredFromStorage)
+          ? false
+          : (await syncRoomSenderKeys(msg.room_id, { includeDelivered: true, limit: 64 })) > 0;
+
+        if (senderKeyArrived || recoveredFromStorage || recoveredFromDeliveredHistory) {
           try {
             await flushPendingControlMessagesNow();
             return await decryptRoomMessage(msg, userId);

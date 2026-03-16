@@ -61,6 +61,12 @@ import { hasKnownNpub, rememberUsers } from '../crypto/identityDirectory.js';
 const MAC_SCREEN_CAPTURE_PERMISSION_MESSAGE = 'Screen sharing needs macOS Screen Recording permission. Open System Settings > Privacy & Security > Screen & System Audio Recording and enable /guild, then fully restart the app.';
 const RNNOISE_SEND_MAKEUP_GAIN = 2.4;
 const APPLE_VOICE_LIVE_START_TIMEOUT_MS = 3200;
+const SCREEN_SHARE_TARGET_WIDTH = 1920;
+const SCREEN_SHARE_TARGET_HEIGHT = 1080;
+const SCREEN_SHARE_TARGET_FPS = 30;
+const SCREEN_SHARE_MAX_BITRATE = 18_000_000;
+const SCREEN_SHARE_MIN_BITRATE_KBPS = 2500;
+const SCREEN_SHARE_START_BITRATE_KBPS = 10_000;
 
 function applyNoiseSuppressionRoutingTo(routing, enabled) {
   if (!routing) {
@@ -1339,7 +1345,10 @@ export function useVoice() {
     deviceRef.current = null;
     liveCaptureRef.current = null;
     participantIdsRef.current = [];
+    channelIdRef.current = null;
+    setChannelId(null);
     clearVoiceKey();
+    setVoiceChannelId(null);
     setVoiceChannelParticipants([]);
     setJoinError(null);
     setVoiceE2E(false);
@@ -1361,7 +1370,6 @@ export function useVoice() {
       try { await emitAsync('voice:leave', { channelId: targetChannelId }); } catch {}
     }
 
-    setChannelId(null);
     setMuted(false);
     setDeafened(false);
     setSpeaking(false);
@@ -2164,22 +2172,51 @@ export function useVoice() {
       }
 
       const stream = await navigator.mediaDevices.getDisplayMedia({
-        video: { width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 60 } },
+        video: {
+          width: { ideal: SCREEN_SHARE_TARGET_WIDTH, max: SCREEN_SHARE_TARGET_WIDTH },
+          height: { ideal: SCREEN_SHARE_TARGET_HEIGHT, max: SCREEN_SHARE_TARGET_HEIGHT },
+          frameRate: { ideal: SCREEN_SHARE_TARGET_FPS, max: SCREEN_SHARE_TARGET_FPS },
+        },
         audio: includeAudio && !macAudioDeviceId,
       });
       screenShareStreamRef.current = stream;
       setScreenShareStream(stream);
 
       const videoTrack = stream.getVideoTracks()[0];
-      videoTrack.contentHint = 'motion';
+      if (!videoTrack) {
+        throw new Error('Screen capture did not provide a video track.');
+      }
+      try {
+        await videoTrack.applyConstraints({
+          width: SCREEN_SHARE_TARGET_WIDTH,
+          height: SCREEN_SHARE_TARGET_HEIGHT,
+          frameRate: SCREEN_SHARE_TARGET_FPS,
+        });
+      } catch {}
+      try {
+        videoTrack.contentHint = 'text';
+      } catch {
+        videoTrack.contentHint = 'detail';
+      }
       videoTrack.onended = () => {
         stopScreenShareRef.current?.();
       };
 
       const producer = await sendTransport.produce({
         track: videoTrack,
-        encodings: [{ maxBitrate: 8_000_000, maxFramerate: 60 }],
-        codecOptions: { videoGoogleStartBitrate: 3000 },
+        encodings: [{
+          maxBitrate: SCREEN_SHARE_MAX_BITRATE,
+          maxFramerate: SCREEN_SHARE_TARGET_FPS,
+          scaleResolutionDownBy: 1,
+          priority: 'high',
+          networkPriority: 'high',
+          scalabilityMode: 'L1T1',
+        }],
+        codecOptions: {
+          videoGoogleStartBitrate: SCREEN_SHARE_START_BITRATE_KBPS,
+          videoGoogleMinBitrate: SCREEN_SHARE_MIN_BITRATE_KBPS,
+          videoGoogleMaxBitrate: Math.round(SCREEN_SHARE_MAX_BITRATE / 1000),
+        },
         appData: { source: 'screen-video' },
       });
       screenShareProducerRef.current = producer;
@@ -2212,6 +2249,26 @@ export function useVoice() {
       const videoSender = producer.rtpSender;
       if (!videoSender) {
         throw new Error('Screen sharing is unavailable because secure media transforms could not attach to video.');
+      }
+      if (videoSender.getParameters && videoSender.setParameters) {
+        try {
+          const parameters = videoSender.getParameters() || {};
+          parameters.degradationPreference = 'maintain-resolution';
+          if (Array.isArray(parameters.encodings) && parameters.encodings.length > 0) {
+            parameters.encodings = parameters.encodings.map((encoding) => ({
+              ...encoding,
+              maxBitrate: SCREEN_SHARE_MAX_BITRATE,
+              maxFramerate: SCREEN_SHARE_TARGET_FPS,
+              scaleResolutionDownBy: 1,
+              priority: 'high',
+              networkPriority: 'high',
+              scalabilityMode: encoding.scalabilityMode || 'L1T1',
+            }));
+          }
+          await videoSender.setParameters(parameters);
+        } catch (senderParamErr) {
+          console.warn('[Voice] Failed to raise screen share sender parameters:', senderParamErr);
+        }
       }
       attachSenderEncryption(videoSender);
 

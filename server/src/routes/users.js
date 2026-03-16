@@ -4,7 +4,6 @@ const {
   getVisibleUsers,
   getUserByNpub,
   getUserById,
-  getUserByUsername,
   updateUserUsername,
   updateUserLud16,
   updateUserProfilePicture,
@@ -30,27 +29,6 @@ function parseProfilePictureUrl(url) {
   if (!trimmed) return { ok: true, value: null };
   if (!/^https?:\/\//i.test(trimmed)) return { ok: false, value: null };
   return { ok: true, value: trimmed.slice(0, 2048) };
-}
-
-function resolveAvailableUsername(baseName, currentUserId) {
-  const normalized = normalizeDisplayName(baseName, '');
-  if (!normalized) return null;
-
-  const exact = getUserByUsername.get(normalized);
-  if (!exact || exact.id === currentUserId) {
-    return normalized;
-  }
-
-  for (let index = 1; index < 1000; index += 1) {
-    const suffix = `_${index}`;
-    const candidate = normalized.slice(0, Math.max(1, 30 - suffix.length)) + suffix;
-    const existing = getUserByUsername.get(candidate);
-    if (!existing || existing.id === currentUserId) {
-      return candidate;
-    }
-  }
-
-  return null;
 }
 
 router.get('/', auth, (req, res) => {
@@ -109,11 +87,7 @@ router.put('/me/nostr-profile', auth, (req, res) => {
     return res.status(404).json({ error: 'User not found' });
   }
 
-  const requestedName = normalizeDisplayName(req.body?.displayName, user.username);
-  const nextUsername = resolveAvailableUsername(requestedName, user.id);
-  if (!nextUsername) {
-    return res.status(409).json({ error: 'Unable to reserve that display name' });
-  }
+  const nextUsername = normalizeDisplayName(req.body?.displayName, user.username);
 
   const { ok: pictureOk, value: nextPicture } = parseProfilePictureUrl(req.body?.profilePicture);
   if (!pictureOk) {
@@ -134,9 +108,6 @@ router.put('/me/nostr-profile', auth, (req, res) => {
       updateUserProfilePicture.run(nextPicture, user.id);
     }
   } catch (err) {
-    if (err?.message?.includes('UNIQUE constraint failed')) {
-      return res.status(409).json({ error: 'Display name already in use' });
-    }
     throw err;
   }
 
