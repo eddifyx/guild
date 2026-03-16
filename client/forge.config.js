@@ -21,6 +21,69 @@ function copyDirSync(src, dest) {
   }
 }
 
+function copyRuntimeFilesIntoBuild(buildPath) {
+  const rootModules = path.resolve(__dirname, 'node_modules');
+  const buildModules = path.join(buildPath, 'node_modules');
+  fs.mkdirSync(buildModules, { recursive: true });
+
+  for (const dep of NATIVE_DEPS) {
+    const src = path.join(rootModules, dep);
+    const dest = path.join(buildModules, dep);
+    if (fs.existsSync(src)) {
+      copyDirSync(src, dest);
+    }
+  }
+
+  const transitiveDeps = ['node-gyp-build', 'uuid', 'type-fest', 'bindings', 'file-uri-to-path'];
+  for (const dep of transitiveDeps) {
+    const src = path.join(rootModules, dep);
+    const dest = path.join(buildModules, dep);
+    if (fs.existsSync(src) && !fs.existsSync(dest)) {
+      copyDirSync(src, dest);
+    }
+  }
+
+  for (const relDir of RUNTIME_SOURCE_DIRS) {
+    const src = path.join(__dirname, relDir);
+    const dest = path.join(buildPath, relDir);
+    if (fs.existsSync(src)) {
+      copyDirSync(src, dest);
+    }
+  }
+}
+
+function getPackagedResourcesDir(outputPath, platform) {
+  if (platform === 'darwin') {
+    return path.join(outputPath, 'Byzantine.app', 'Contents', 'Resources');
+  }
+
+  return path.join(outputPath, 'resources');
+}
+
+function copyRuntimeFilesIntoPackagedApp(outputPath, platform) {
+  const resourcesDir = getPackagedResourcesDir(outputPath, platform);
+  const vendorModulesDir = path.join(resourcesDir, 'vendor', 'node_modules');
+  fs.mkdirSync(vendorModulesDir, { recursive: true });
+
+  const rootModules = path.resolve(__dirname, 'node_modules');
+  const packages = [
+    ...NATIVE_DEPS,
+    'node-gyp-build',
+    'uuid',
+    'type-fest',
+    'bindings',
+    'file-uri-to-path',
+  ];
+
+  for (const dep of packages) {
+    const src = path.join(rootModules, dep);
+    const dest = path.join(vendorModulesDir, dep);
+    if (fs.existsSync(src)) {
+      copyDirSync(src, dest);
+    }
+  }
+}
+
 module.exports = {
   packagerConfig: {
     name: 'Byzantine',
@@ -32,42 +95,11 @@ module.exports = {
   },
   hooks: {
     packageAfterCopy: async (_config, buildPath) => {
-      // Copy native deps from monorepo root node_modules into the build
-      const rootModules = path.resolve(__dirname, '..', 'node_modules');
-      const buildModules = path.join(buildPath, 'node_modules');
-      fs.mkdirSync(buildModules, { recursive: true });
-
-      for (const dep of NATIVE_DEPS) {
-        const src = path.join(rootModules, dep);
-        const dest = path.join(buildModules, dep);
-        if (fs.existsSync(src)) {
-          copyDirSync(src, dest);
-        }
-      }
-
-      // Runtime transitive deps:
-      // libsignal-client needs: node-gyp-build (loads .node), uuid, type-fest
-      // better-sqlite3 needs: bindings (loads .node), file-uri-to-path
-      const transitiveDeps = ['node-gyp-build', 'uuid', 'type-fest', 'bindings', 'file-uri-to-path'];
-      for (const dep of transitiveDeps) {
-        const src = path.join(rootModules, dep);
-        const dest = path.join(buildModules, dep);
-        if (fs.existsSync(src) && !fs.existsSync(dest)) {
-          copyDirSync(src, dest);
-        }
-      }
-
-      // Keep raw main-process crypto helpers available at runtime.
-      // Vite leaves the require() in main.js, so packaged builds need these files copied in.
-      for (const relDir of RUNTIME_SOURCE_DIRS) {
-        const src = path.join(__dirname, relDir);
-        const dest = path.join(buildPath, relDir);
-        if (fs.existsSync(src)) {
-          copyDirSync(src, dest);
-        }
-      }
+      copyRuntimeFilesIntoBuild(buildPath);
     },
     packageAfterPrune: async (_config, buildPath) => {
+      copyRuntimeFilesIntoBuild(buildPath);
+
       // Rebuild native addons for the target Electron version
       const { rebuild } = require('@electron/rebuild');
       await rebuild({
@@ -75,6 +107,11 @@ module.exports = {
         electronVersion: require('./package.json').devDependencies.electron.replace('^', ''),
         force: true,
       });
+    },
+    postPackage: async (_config, packageResult) => {
+      for (const outputPath of packageResult.outputPaths) {
+        copyRuntimeFilesIntoPackagedApp(outputPath, packageResult.platform);
+      }
     },
   },
   makers: [
@@ -110,4 +147,3 @@ module.exports = {
     }),
   ],
 };
-

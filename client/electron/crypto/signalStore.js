@@ -10,7 +10,8 @@
  * AES-256-GCM using the master key from Electron safeStorage.
  */
 
-const Database = require('better-sqlite3');
+const { requireRuntimeModule, importLibsignalModule } = require('./runtimeModules');
+const { createMemoryProtocolStore } = require('./signalStoreMemory');
 const crypto = require('crypto');
 const path = require('path');
 const { app } = require('electron');
@@ -109,6 +110,7 @@ function migrateDatabase(db) {
 }
 
 function openDatabase(userId) {
+  const Database = requireRuntimeModule('better-sqlite3');
   const dbPath = path.join(app.getPath('userData'), `signal-protocol-${userId}.db`);
   const db = new Database(dbPath);
   db.pragma('journal_mode = WAL');
@@ -140,7 +142,7 @@ async function getProtocolStoreClass() {
         PublicKey,
         IdentityKeyPair,
         IdentityChange,
-      } = await import('@signalapp/libsignal-client');
+      } = await importLibsignalModule();
 
 class SQLiteSessionStore extends SessionStore {
   constructor(db, masterKey) {
@@ -149,6 +151,7 @@ class SQLiteSessionStore extends SessionStore {
     this._mk = masterKey;
     this._save = db.prepare('INSERT OR REPLACE INTO sessions (address, record) VALUES (?, ?)');
     this._get = db.prepare('SELECT record FROM sessions WHERE address = ?');
+    this._del = db.prepare('DELETE FROM sessions WHERE address = ?');
   }
 
   async saveSession(address, record) {
@@ -172,6 +175,10 @@ class SQLiteSessionStore extends SessionStore {
       if (session) results.push(session);
     }
     return results;
+  }
+
+  async removeSession(address) {
+    this._del.run(address.toString());
   }
 }
 
@@ -538,6 +545,10 @@ class ProtocolStore {
     this.roomDistribution = new RoomDistributionMap(this._db);
   }
 
+  async removeSession(address) {
+    await this.session.removeSession(address);
+  }
+
   close() {
     if (this._db) {
       this._db.close();
@@ -558,10 +569,24 @@ class ProtocolStore {
   return protocolStoreClassPromise;
 }
 
+function shouldUseMemoryStoreFallback(error) {
+  if (process.platform !== 'win32') return false;
+  const details = `${error?.message || ''}\n${error?.stack || ''}`;
+  return /better-sqlite3|better_sqlite3\.node|bindings/i.test(details);
+}
+
 async function createProtocolStore(userId, masterKey) {
   const ProtocolStore = await getProtocolStoreClass();
-  return new ProtocolStore(userId, masterKey);
+  try {
+    return new ProtocolStore(userId, masterKey);
+  } catch (error) {
+    if (!shouldUseMemoryStoreFallback(error)) {
+      throw error;
+    }
+
+    console.warn('[Signal] better-sqlite3 unavailable; using in-memory Signal store fallback on Windows');
+    return createMemoryProtocolStore(userId, masterKey);
+  }
 }
 
 module.exports = { createProtocolStore };
-

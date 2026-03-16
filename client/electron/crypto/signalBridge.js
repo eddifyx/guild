@@ -13,18 +13,12 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { createProtocolStore } = require('./signalStore');
+const { importLibsignalModule } = require('./runtimeModules');
 let signalModulePromise = null;
 
 async function getSignalModule() {
   if (!signalModulePromise) {
-    const originalCwd = process.cwd();
-    const libsignalPackageJson = require.resolve('@signalapp/libsignal-client/package.json');
-    const libsignalRoot = path.dirname(libsignalPackageJson);
-
-    process.chdir(libsignalRoot);
-    signalModulePromise = import('@signalapp/libsignal-client').finally(() => {
-      process.chdir(originalCwd);
-    });
+    signalModulePromise = importLibsignalModule();
   }
 
   return signalModulePromise;
@@ -348,8 +342,8 @@ function registerSignalHandlers(ipcMain) {
   ipcMain.handle('signal:delete-session', async (_event, recipientId) => {
     if (!store) return;
     const { ProtocolAddress } = await getSignalModule();
-    const addr = ProtocolAddress.new(recipientId, DEVICE_ID).toString();
-    store._db.prepare('DELETE FROM sessions WHERE address = ?').run(addr);
+    const address = ProtocolAddress.new(recipientId, DEVICE_ID);
+    await store.removeSession(address);
   });
 
   // ---- Create SenderKeyDistributionMessage ----
@@ -511,4 +505,3 @@ function registerSignalHandlers(ipcMain) {
 }
 
 module.exports = { registerSignalHandlers };
-
