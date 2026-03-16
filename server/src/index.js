@@ -1,5 +1,6 @@
 const express = require('express');
 const http = require('http');
+const https = require('https');
 const { Server } = require('socket.io');
 const cors = require('cors');
 const helmet = require('helmet');
@@ -38,7 +39,36 @@ const devDashboardRoutes = require('./routes/devDashboard');
 const runtimeMetrics = require('./monitoring/runtimeMetrics');
 
 const PORT = process.env.PORT || 3001;
+const HTTP_REDIRECT_PORT = process.env.HTTP_REDIRECT_PORT
+  ? Number(process.env.HTTP_REDIRECT_PORT)
+  : null;
+const TLS_KEY_PATH = process.env.TLS_KEY_PATH || '';
+const TLS_CERT_PATH = process.env.TLS_CERT_PATH || '';
+const TLS_CA_PATH = process.env.TLS_CA_PATH || '';
 const clientVersionPath = path.join(__dirname, '..', 'client-version.json');
+
+function loadTlsOptions() {
+  if (!TLS_KEY_PATH && !TLS_CERT_PATH) {
+    return null;
+  }
+  if (!TLS_KEY_PATH || !TLS_CERT_PATH) {
+    throw new Error('Both TLS_KEY_PATH and TLS_CERT_PATH are required to enable HTTPS');
+  }
+
+  const options = {
+    key: fs.readFileSync(TLS_KEY_PATH),
+    cert: fs.readFileSync(TLS_CERT_PATH),
+  };
+
+  if (TLS_CA_PATH) {
+    options.ca = fs.readFileSync(TLS_CA_PATH);
+  }
+
+  return options;
+}
+
+const tlsOptions = loadTlsOptions();
+const HTTPS_ENABLED = !!tlsOptions;
 
 function readClientVersion() {
   try {
@@ -46,6 +76,44 @@ function readClientVersion() {
   } catch {
     return { version: '0.0.0' };
   }
+}
+
+function normalizePlatform(rawPlatform = '') {
+  const platform = String(rawPlatform || '').trim().toLowerCase();
+  switch (platform) {
+    case 'darwin':
+    case 'mac':
+    case 'macos':
+    case 'osx':
+      return 'darwin-arm64';
+    case 'win32':
+    case 'windows':
+      return 'win32-x64';
+    default:
+      return platform;
+  }
+}
+
+function resolveVersionInfoForPlatform(versionInfo, rawPlatform = '') {
+  const normalizedPlatform = normalizePlatform(rawPlatform);
+  const {
+    platformOverrides,
+    ...baseVersionInfo
+  } = (versionInfo && typeof versionInfo === 'object') ? versionInfo : { version: '0.0.0' };
+
+  if (!platformOverrides || typeof platformOverrides !== 'object') {
+    return baseVersionInfo;
+  }
+
+  const override = platformOverrides[normalizedPlatform];
+  if (!override || typeof override !== 'object') {
+    return baseVersionInfo;
+  }
+
+  return {
+    ...baseVersionInfo,
+    ...override,
+  };
 }
 
 // Ensure uploads directory exists
@@ -57,7 +125,30 @@ const mime = require('mime');
 mime.define({ 'image/avif': ['avif'] });
 
 const app = express();
-const server = http.createServer(app);
+app.set('trust proxy', true);
+
+const server = HTTPS_ENABLED
+  ? https.createServer(tlsOptions, app)
+  : http.createServer(app);
+
+function getRequestProtocol(req) {
+  const forwardedProto = req.get('x-forwarded-proto');
+  if (typeof forwardedProto === 'string' && forwardedProto.trim()) {
+    return forwardedProto.split(',')[0].trim();
+  }
+  if (req.secure || req.socket?.encrypted) {
+    return 'https';
+  }
+  return 'http';
+}
+
+function buildHttpsRedirectUrl(req) {
+  const hostHeader = req.get('x-forwarded-host') || req.get('host') || 'localhost';
+  const normalizedHost = HTTP_REDIRECT_PORT && Number(PORT) !== 443
+    ? hostHeader.replace(/:\d+$/, `:${PORT}`)
+    : (Number(PORT) === 443 ? hostHeader.replace(/:\d+$/, '') : hostHeader);
+  return `https://${normalizedHost}${req.url}`;
+}
 
 app.use((req, res, next) => {
   const requestUrl = req.originalUrl || req.url || '';
@@ -144,8 +235,8 @@ app.use(cors(corsOptions));
 // Redirect HTTP to HTTPS in production (when behind a reverse proxy that sets x-forwarded-proto)
 if (process.env.NODE_ENV === 'production') {
   app.use((req, res, next) => {
-    if (req.headers['x-forwarded-proto'] === 'http') {
-      return res.redirect(301, `https://${req.headers.host}${req.url}`);
+    if (getRequestProtocol(req) === 'http' && (HTTPS_ENABLED || req.headers['x-forwarded-proto'])) {
+      return res.redirect(308, buildHttpsRedirectUrl(req));
     }
     next();
   });
@@ -230,35 +321,64 @@ if (!fs.existsSync(updatesDir)) fs.mkdirSync(updatesDir, { recursive: true });
 app.use('/updates', express.static(updatesDir));
 
 function buildAbsoluteUrl(req, relativePath) {
-  const protocol = req.get('x-forwarded-proto') || req.protocol || 'http';
+  const protocol = getRequestProtocol(req);
   return `${protocol}://${req.get('host')}${relativePath}`;
 }
 
+function resolveUpdateArtifact(relativePath) {
+  const filename = relativePath.replace(/^\/updates\//, '');
+  const absolutePath = path.join(updatesDir, filename);
+  return fs.existsSync(absolutePath) ? relativePath : null;
+}
+
 function buildUpdateDownloads(req, version) {
+  const darwinInstallerPath = resolveUpdateArtifact(`/updates/guild-${version}-arm64.dmg`);
+  const darwinArchivePath = resolveUpdateArtifact(`/updates/guild-darwin-arm64-${version}.zip`);
+  const windowsArchivePath = resolveUpdateArtifact(`/updates/guild-win32-x64-${version}.zip`);
+
   return {
     'darwin-arm64': {
       label: 'Mac Apple Silicon',
-      installerUrl: buildAbsoluteUrl(req, `/updates/guild-${version}-arm64.dmg`),
-      archiveUrl: buildAbsoluteUrl(req, `/updates/guild-darwin-arm64-${version}.zip`),
+      installerUrl: darwinInstallerPath ? buildAbsoluteUrl(req, darwinInstallerPath) : null,
+      archiveUrl: darwinArchivePath ? buildAbsoluteUrl(req, darwinArchivePath) : null,
     },
     'win32-x64': {
       label: 'Windows 10 x64',
-      installerUrl: buildAbsoluteUrl(req, `/updates/guild-win32-x64-${version}.zip`),
-      archiveUrl: buildAbsoluteUrl(req, `/updates/guild-win32-x64-${version}.zip`),
+      installerUrl: windowsArchivePath ? buildAbsoluteUrl(req, windowsArchivePath) : null,
+      archiveUrl: windowsArchivePath ? buildAbsoluteUrl(req, windowsArchivePath) : null,
     },
+  };
+}
+
+function resolveUpdateDelivery(platform, downloads) {
+  const platformDownload = downloads?.[platform] || null;
+  const hasNativeArchive = Boolean(platformDownload?.archiveUrl);
+
+  if (hasNativeArchive) {
+    return {
+      updateStrategy: 'native',
+      manualInstallReason: null,
+    };
+  }
+
+  return {
+    updateStrategy: 'manual-install',
+    manualInstallReason: 'Direct download is required until an auto-update archive is published for this platform.',
   };
 }
 
 app.get('/api/version', (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
-  const versionInfo = readClientVersion();
+  const requestedPlatform = normalizePlatform(req.query.platform);
+  const versionInfo = resolveVersionInfoForPlatform(readClientVersion(), requestedPlatform);
   const version = versionInfo?.version || '0.0.0';
+  const downloads = buildUpdateDownloads(req, version);
+  const delivery = resolveUpdateDelivery(requestedPlatform, downloads);
   res.json({
     ...versionInfo,
-    updateStrategy: 'manual-install',
-    manualInstallReason: 'Direct download is required for this release.',
+    ...delivery,
     downloadPageUrl: buildAbsoluteUrl(req, '/download'),
-    downloads: buildUpdateDownloads(req, version),
+    downloads,
   });
 });
 
@@ -370,6 +490,13 @@ app.get('/download', (req, res) => {
         margin-top: 22px;
         font-size: 13px;
       }
+      .empty {
+        padding: 18px 20px;
+        border-radius: 18px;
+        border: 1px dashed rgba(255, 122, 0, 0.28);
+        background: rgba(18, 12, 5, 0.6);
+        color: var(--muted);
+      }
     </style>
   </head>
   <body>
@@ -378,21 +505,27 @@ app.get('/download', (req, res) => {
       <h1>/guild downloads</h1>
       <p>If the in-app updater stalls on extracting files, install the latest build directly from here once. After that, future updates will use the newer updater path.</p>
       <section class="grid">
+        ${downloads['darwin-arm64'].installerUrl || downloads['darwin-arm64'].archiveUrl ? `
         <article class="download">
           <h2>${downloads['darwin-arm64'].label}</h2>
           <p>Recommended for Apple Silicon Macs.</p>
           <div class="actions">
-            <a class="button" href="${downloads['darwin-arm64'].installerUrl}">Download DMG</a>
-            <a class="button secondary" href="${downloads['darwin-arm64'].archiveUrl}">Download ZIP</a>
+            ${downloads['darwin-arm64'].installerUrl ? `<a class="button" href="${downloads['darwin-arm64'].installerUrl}">Download DMG</a>` : ''}
+            ${downloads['darwin-arm64'].archiveUrl ? `<a class="button secondary" href="${downloads['darwin-arm64'].archiveUrl}">Download ZIP</a>` : ''}
           </div>
-        </article>
+        </article>` : ''}
+        ${downloads['win32-x64'].installerUrl ? `
         <article class="download">
           <h2>${downloads['win32-x64'].label}</h2>
           <p>Direct install package for Windows.</p>
           <div class="actions">
             <a class="button" href="${downloads['win32-x64'].installerUrl}">Download ZIP</a>
           </div>
-        </article>
+        </article>` : ''}
+        ${!downloads['darwin-arm64'].installerUrl && !downloads['darwin-arm64'].archiveUrl && !downloads['win32-x64'].installerUrl ? `
+        <article class="empty">
+          No release downloads have been published for this version yet.
+        </article>` : ''}
       </section>
       <p class="footnote">Install the new build over the existing app. Your account and server settings stay with the app profile on disk.</p>
     </main>
@@ -430,6 +563,25 @@ guildRoutes._io = io;
 // Initialize Socket.IO
 initSocket(io);
 
+function createHttpRedirectServer() {
+  if (!HTTPS_ENABLED || !HTTP_REDIRECT_PORT || Number(HTTP_REDIRECT_PORT) === Number(PORT)) {
+    return null;
+  }
+
+  return http.createServer((req, res) => {
+    const hostHeader = req.headers.host || 'localhost';
+    const redirectHost = Number(PORT) === 443
+      ? hostHeader.replace(/:\d+$/, '')
+      : hostHeader.replace(/:\d+$/, `:${PORT}`);
+    res.writeHead(308, {
+      Location: `https://${redirectHost}${req.url || '/'}`,
+    });
+    res.end();
+  });
+}
+
+const httpRedirectServer = createHttpRedirectServer();
+
 // Start server (mediasoup workers optional)
 (async () => {
   // Clear stale voice sessions from previous runs
@@ -441,8 +593,14 @@ initSocket(io);
     console.warn(`[mediasoup] Workers unavailable â€” voice/video disabled: ${err.message}`);
   }
   server.listen(PORT, () => {
-    console.log(`Messenger server running on http://localhost:${PORT}`);
+    const protocol = HTTPS_ENABLED ? 'https' : 'http';
+    console.log(`Messenger server running on ${protocol}://localhost:${PORT}`);
   });
+  if (httpRedirectServer) {
+    httpRedirectServer.listen(HTTP_REDIRECT_PORT, () => {
+      console.log(`HTTP redirect server running on http://localhost:${HTTP_REDIRECT_PORT}`);
+    });
+  }
 
   // Clean up expired asset dumps every 10 minutes
   setInterval(() => {

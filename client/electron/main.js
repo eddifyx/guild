@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, Tray, ipcMain, Notification, dialog, desktopCapturer, session, shell, safeStorage, systemPreferences } = require('electron');
+const { app, BrowserWindow, Menu, Tray, ipcMain, Notification, dialog, desktopCapturer, session, shell, systemPreferences } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -12,6 +12,13 @@ function sanitizeProfileId(rawValue) {
   if (!trimmed) return null;
   const normalized = trimmed.replace(/[^A-Za-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '');
   return normalized ? normalized.slice(0, 32) : null;
+}
+
+function sanitizeServerUrl(rawValue) {
+  if (typeof rawValue !== 'string') return null;
+  const trimmed = rawValue.trim().replace(/\/+$/, '');
+  if (!trimmed) return null;
+  return /^https?:\/\//i.test(trimmed) ? trimmed : null;
 }
 
 function getRuntimeProfile(argv = process.argv, env = process.env) {
@@ -31,10 +38,28 @@ function getRuntimeProfile(argv = process.argv, env = process.env) {
   return null;
 }
 
+function getRuntimeServerUrl(argv = process.argv, env = process.env) {
+  const envServerUrl = sanitizeServerUrl(env.GUILD_DEFAULT_SERVER_URL || env.VITE_DEFAULT_SERVER_URL || '');
+  if (envServerUrl) return envServerUrl;
+
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+    if (arg === '--server-url') {
+      return sanitizeServerUrl(argv[i + 1]);
+    }
+    if (typeof arg === 'string' && arg.startsWith('--server-url=')) {
+      return sanitizeServerUrl(arg.slice('--server-url='.length));
+    }
+  }
+
+  return null;
+}
+
 const PRODUCT_NAME = 'guild';
 const PRODUCT_SLUG = 'guild';
 const LEGACY_UPDATE_SLUG = 'Byzantine';
 const PROFILE_ID = getRuntimeProfile();
+const RUNTIME_SERVER_URL = getRuntimeServerUrl();
 const PROFILE_LABEL = PROFILE_ID ? ` (${PROFILE_ID})` : '';
 let profilePartition = `persist:${PRODUCT_SLUG}-default`;
 
@@ -78,7 +103,9 @@ function loadSignalBridge() {
 
 const { registerSignalHandlers } = loadSignalBridge();
 
-app.disableHardwareAcceleration();
+if (process.env.GUILD_DISABLE_HARDWARE_ACCELERATION === '1') {
+  app.disableHardwareAcceleration();
+}
 app.setAppUserModelId(`${PRODUCT_SLUG}.${PROFILE_ID || 'default'}`);
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
 app.commandLine.appendSwitch('disable-renderer-backgrounding');
@@ -149,13 +176,6 @@ function pruneMessageCacheEntries(entries) {
 
 function serializeMessageCache(entries) {
   const payload = JSON.stringify(entries || {});
-  if (safeStorage.isEncryptionAvailable()) {
-    return JSON.stringify({
-      encrypted: true,
-      payload: safeStorage.encryptString(payload).toString('base64'),
-    });
-  }
-
   return JSON.stringify({
     encrypted: false,
     payload,
@@ -168,9 +188,16 @@ function deserializeMessageCache(raw) {
   const parsed = JSON.parse(raw);
   if (!parsed || typeof parsed !== 'object') return {};
 
-  const payload = parsed.encrypted
-    ? safeStorage.decryptString(Buffer.from(parsed.payload, 'base64'))
-    : parsed.payload;
+  if (!Object.prototype.hasOwnProperty.call(parsed, 'payload')) {
+    return parsed;
+  }
+
+  if (parsed.encrypted) {
+    // Legacy keychain-backed cache entries are intentionally discarded.
+    return {};
+  }
+
+  const payload = parsed.payload;
 
   return typeof payload === 'string' ? JSON.parse(payload) : {};
 }
@@ -737,13 +764,20 @@ const createWindow = () => {
     },
   });
 
+  const runtimeQuery = RUNTIME_SERVER_URL ? { serverUrl: RUNTIME_SERVER_URL } : null;
+
   if (MAIN_WINDOW_VITE_DEV_SERVER_URL) {
-    mainWindow.loadURL(MAIN_WINDOW_VITE_DEV_SERVER_URL);
+    const targetUrl = new URL(MAIN_WINDOW_VITE_DEV_SERVER_URL);
+    if (runtimeQuery?.serverUrl) {
+      targetUrl.searchParams.set('serverUrl', runtimeQuery.serverUrl);
+    }
+    mainWindow.loadURL(targetUrl.toString());
     // Auto-open DevTools in dev mode
     mainWindow.webContents.openDevTools();
   } else {
     mainWindow.loadFile(
-      path.join(__dirname, `../renderer/${MAIN_WINDOW_VITE_NAME}/index.html`)
+      path.join(__dirname, `../renderer/${MAIN_WINDOW_VITE_NAME}/index.html`),
+      runtimeQuery ? { query: runtimeQuery } : undefined
     );
   }
 
@@ -1075,31 +1109,6 @@ ipcMain.handle('show-notification', (event, { title, body }) => {
   }
 });
 
-// E2E Encryption: safeStorage IPC for master key persistence via OS keychain
-ipcMain.handle('safe-storage-available', () => {
-  try {
-    return safeStorage.isEncryptionAvailable();
-  } catch {
-    return false;
-  }
-});
-ipcMain.handle('safe-storage-encrypt', (event, plaintext) => {
-  try {
-    if (!safeStorage.isEncryptionAvailable()) throw new Error('safeStorage not available');
-    return safeStorage.encryptString(plaintext).toString('base64');
-  } catch (error) {
-    throw new Error(`safeStorage encrypt failed: ${error?.message || 'unknown error'}`);
-  }
-});
-ipcMain.handle('safe-storage-decrypt', (event, encrypted) => {
-  try {
-    if (!safeStorage.isEncryptionAvailable()) throw new Error('safeStorage not available');
-    return safeStorage.decryptString(Buffer.from(encrypted, 'base64'));
-  } catch (error) {
-    throw new Error(`safeStorage decrypt failed: ${error?.message || 'unknown error'}`);
-  }
-});
-
 ipcMain.handle('message-cache:get', (event, userId, messageId) => {
   const state = loadMessageCacheState(userId);
   if (!state || !messageId) return null;
@@ -1157,15 +1166,50 @@ ipcMain.handle('open-external', (event, url) => {
   }
 });
 
+function resolveUpdateArchiveUrl(updateSource) {
+  if (updateSource && typeof updateSource === 'object') {
+    if (typeof updateSource.archiveUrl === 'string' && updateSource.archiveUrl.trim()) {
+      return updateSource.archiveUrl.trim();
+    }
+    if (typeof updateSource?.platformDownload?.archiveUrl === 'string' && updateSource.platformDownload.archiveUrl.trim()) {
+      return updateSource.platformDownload.archiveUrl.trim();
+    }
+    if (typeof updateSource.serverUrl === 'string' && updateSource.serverUrl.trim()) {
+      const normalized = updateSource.serverUrl.trim().replace(/\/+$/, '');
+      const plat = process.platform === 'darwin' ? `darwin-${process.arch}` : `${process.platform}-${process.arch}`;
+      return `${normalized}/updates/${LEGACY_UPDATE_SLUG}-latest-${plat}.zip`;
+    }
+  }
+
+  if (typeof updateSource === 'string' && updateSource.trim()) {
+    const normalized = updateSource.trim().replace(/\/+$/, '');
+    const plat = process.platform === 'darwin' ? `darwin-${process.arch}` : `${process.platform}-${process.arch}`;
+    return `${normalized}/updates/${LEGACY_UPDATE_SLUG}-latest-${plat}.zip`;
+  }
+
+  return null;
+}
+
+function buildUpdateRelaunchArgs() {
+  const args = [];
+  if (PROFILE_ID) {
+    args.push(`--profile=${PROFILE_ID}`);
+  }
+  if (RUNTIME_SERVER_URL) {
+    args.push(`--server-url=${RUNTIME_SERVER_URL}`);
+  }
+  return args;
+}
+
 // Self-update: download zip from server
-ipcMain.handle('download-update', async (event, serverUrl) => {
+ipcMain.handle('download-update', async (event, updateSource) => {
   const tempDir = path.join(os.tmpdir(), `${PRODUCT_SLUG}-update-` + Date.now());
   fs.mkdirSync(tempDir, { recursive: true });
   const zipPath = path.join(tempDir, 'update.zip');
-  const plat = process.platform === 'darwin' ? `darwin-${process.arch}` : `${process.platform}-${process.arch}`;
-  // Keep the legacy update basename for one bridge release so existing installs
-  // can still discover the renamed app build without a separate migration flow.
-  const zipUrl = `${serverUrl}/updates/${LEGACY_UPDATE_SLUG}-latest-${plat}.zip`;
+  const zipUrl = resolveUpdateArchiveUrl(updateSource);
+  if (!zipUrl) {
+    throw new Error('No update archive URL is available for this device.');
+  }
 
   return new Promise((resolve, reject) => {
     const client = zipUrl.startsWith('https') ? https : http;
@@ -1297,6 +1341,10 @@ ipcMain.handle('apply-update', async (event, { zipPath, tempDir }) => {
     // Example: /Applications/<App>.app/Contents/MacOS/<App>
     const currentAppPath = process.execPath.replace(/\/Contents\/MacOS\/.*$/, '');
     const logPath = path.join(os.tmpdir(), `${PRODUCT_SLUG}-update.log`);
+    const relaunchArgs = buildUpdateRelaunchArgs().map((arg) => `"${arg.replace(/"/g, '\\"')}"`).join(' ');
+    const relaunchCommand = relaunchArgs
+      ? `open -a "${currentAppPath}" --args ${relaunchArgs}`
+      : `open "${currentAppPath}"`;
 
     // Shell script: kill app, replace the .app bundle, relaunch.
     const shPath = path.join(tempDir, 'update.sh');
@@ -1310,7 +1358,7 @@ ipcMain.handle('apply-update', async (event, { zipPath, tempDir }) => {
       `rm -rf "${currentAppPath}" >> "${logPath}" 2>&1`,
       `cp -R "${newAppPath}" "${currentAppPath}" >> "${logPath}" 2>&1`,
       `echo "$(date) Copy done" >> "${logPath}"`,
-      `open "${currentAppPath}"`,
+      `${relaunchCommand} >> "${logPath}" 2>&1`,
       `echo "$(date) Relaunch issued" >> "${logPath}"`,
       `rm -rf "${tempDir}"`,
       '',
@@ -1331,6 +1379,10 @@ ipcMain.handle('apply-update', async (event, { zipPath, tempDir }) => {
     const appDir = path.dirname(process.execPath);
     const exeName = path.basename(process.execPath);
     const logPath = path.join(os.tmpdir(), `${PRODUCT_SLUG}-update.log`);
+    const relaunchArgs = buildUpdateRelaunchArgs().join(' ');
+    const launchTarget = relaunchArgs
+      ? `"${path.join(appDir, exeName)}" ${relaunchArgs}`
+      : `"${path.join(appDir, exeName)}"`;
     const batPath = path.join(tempDir, 'update.bat');
     const batContent = [
       '@echo off',
@@ -1345,8 +1397,8 @@ ipcMain.handle('apply-update', async (event, { zipPath, tempDir }) => {
       `echo [%time%] Starting robocopy >> "${logPath}"`,
       `robocopy "${sourceDir}" "${appDir}" /MIR /R:5 /W:2 >> "${logPath}" 2>&1`,
       `echo [%time%] Robocopy done (errorlevel=%errorlevel%) >> "${logPath}"`,
-      `echo [%time%] Launching ${path.join(appDir, exeName)} >> "${logPath}"`,
-      `start "" "${path.join(appDir, exeName)}"`,
+      `echo [%time%] Launching ${launchTarget} >> "${logPath}"`,
+      `start "" ${launchTarget}`,
       `echo [%time%] Launch command issued >> "${logPath}"`,
       '',
     ].join('\r\n');

@@ -5,7 +5,7 @@
  * All values are AES-256-GCM encrypted with a master key before writing.
  *
  * Master key derivation:
- *   - All users: random 32 bytes, persisted via Electron safeStorage (OS keychain)
+ *   - Legacy v1 store only: caller provides a random 32-byte master key
  *
  * IndexedDB is used instead of localStorage because:
  *   - Handles binary blobs efficiently
@@ -143,8 +143,8 @@ function decryptValue(masterKey, encrypted, storeName, key) {
 // ---------------------------------------------------------------------------
 
 /**
- * Generate a random master key for username-only users.
- * The caller is responsible for persisting this via Electron safeStorage.
+ * Generate a random master key for the legacy v1 store.
+ * The caller is responsible for deciding whether to persist it.
  */
 export function generateRandomMasterKey() {
   return randomBytes(32);

@@ -77,7 +77,7 @@ npm run make -- --platform=win32 --arch=x64
 If the build succeeds, the zip will be here:
 
 ```text
-client\out\make\zip\win32\x64\guild-win32-x64-1.0.40.zip
+client\out\make\zip\win32\x64\guild-win32-x64-1.0.41.zip
 ```
 
 The packaged app folder will also exist here:
@@ -101,7 +101,7 @@ Example PowerShell extraction:
 
 ```powershell
 Expand-Archive `
-  -Path .\client\out\make\zip\win32\x64\guild-win32-x64-1.0.40.zip `
+  -Path .\client\out\make\zip\win32\x64\guild-win32-x64-1.0.41.zip `
   -DestinationPath .\client\out\test-guild-win32-x64 `
   -Force
 ```
@@ -135,7 +135,7 @@ Windows machine directly, use `scp`.
 From the repo root on Windows:
 
 ```powershell
-scp .\client\out\make\zip\win32\x64\guild-win32-x64-1.0.40.zip `
+scp .\client\out\make\zip\win32\x64\guild-win32-x64-1.0.41.zip `
   eddifyx@82.221.100.187:/home/eddifyx/
 ```
 
@@ -148,13 +148,13 @@ ssh eddifyx@82.221.100.187
 On the VPS:
 
 ```bash
-sudo cp /home/eddifyx/guild-win32-x64-1.0.40.zip /opt/guild/server/updates/guild-win32-x64-1.0.40.zip
+sudo cp /home/eddifyx/guild-win32-x64-1.0.41.zip /opt/guild/server/updates/guild-win32-x64-1.0.41.zip
 ```
 
 The download path on FlokiNET is:
 
 ```text
-http://82.221.100.187:3001/updates/guild-win32-x64-1.0.40.zip
+http://82.221.100.187:3001/updates/guild-win32-x64-1.0.41.zip
 ```
 
 ## 9. Troubleshooting
@@ -197,7 +197,7 @@ If you trust the artifact you just built yourself:
 
 Right now this repo produces:
 
-- `guild-win32-x64-1.0.40.zip`
+- `guild-win32-x64-1.0.41.zip`
 
 It does **not** currently produce:
 

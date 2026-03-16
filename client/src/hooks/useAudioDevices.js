@@ -13,8 +13,24 @@ export function useAudioDevices() {
   const enumerate = useCallback(async () => {
     try {
       const devices = await navigator.mediaDevices.enumerateDevices();
-      setInputDevices(devices.filter(d => d.kind === 'audioinput'));
-      setOutputDevices(devices.filter(d => d.kind === 'audiooutput'));
+      const nextInputDevices = devices.filter(d => d.kind === 'audioinput');
+      const nextOutputDevices = devices.filter(d => d.kind === 'audiooutput');
+      setInputDevices(nextInputDevices);
+      setOutputDevices(nextOutputDevices);
+      setSelectedInput((prev) => {
+        if (!prev || nextInputDevices.some((device) => device.deviceId === prev)) {
+          return prev;
+        }
+        localStorage.setItem('voice:inputDeviceId', '');
+        return '';
+      });
+      setSelectedOutput((prev) => {
+        if (!prev || nextOutputDevices.some((device) => device.deviceId === prev)) {
+          return prev;
+        }
+        localStorage.setItem('voice:outputDeviceId', '');
+        return '';
+      });
     } catch (err) {
       console.error('Failed to enumerate devices:', err);
     }

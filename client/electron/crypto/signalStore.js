@@ -7,7 +7,7 @@
  *
  * All records are serialized via libsignal's .serialize() and stored as BLOBs
  * in a local SQLite database (better-sqlite3). BLOBs are encrypted with
- * AES-256-GCM using the master key from Electron safeStorage.
+ * AES-256-GCM using the app-local Signal master key managed by signalBridge.
  */
 
 const { requireRuntimeModule, importLibsignalModule } = require('./runtimeModules');

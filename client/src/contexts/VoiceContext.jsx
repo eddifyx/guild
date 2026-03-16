@@ -88,6 +88,10 @@ export function VoiceProvider({ children }) {
     prevSharersRef.current = sharers;
   }, [voice.channelId, channels.voiceChannels, user?.userId]);
 
+  useEffect(() => {
+    voice.setOutputDevice(devices.selectedOutput);
+  }, [devices.selectedOutput, voice.setOutputDevice]);
+
   const voiceValue = useMemo(() => ({
     channelId: voice.channelId,
     muted: voice.muted,

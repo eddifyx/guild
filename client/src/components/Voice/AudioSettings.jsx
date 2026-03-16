@@ -110,9 +110,27 @@ const APPLE_VOICE_TEST_START_TIMEOUT_MS = 1800;
 
 function getActiveOutputDevice(outputDevices, selectedOutputId) {
   if (selectedOutputId) {
-    return outputDevices.find((device) => device.deviceId === selectedOutputId) || null;
+    const selectedDevice = outputDevices.find((device) => device.deviceId === selectedOutputId);
+    if (selectedDevice) {
+      return selectedDevice;
+    }
   }
   return outputDevices.find((device) => device.deviceId === 'default') || outputDevices[0] || null;
+}
+
+function resolveOutputSelection(outputDevices, selectedOutputId) {
+  const activeOutput = getActiveOutputDevice(outputDevices, selectedOutputId);
+  const hasExplicitSelection = Boolean(selectedOutputId);
+  const matchedRequestedOutput = hasExplicitSelection
+    ? outputDevices.some((device) => device.deviceId === selectedOutputId)
+    : false;
+
+  return {
+    activeOutput,
+    activeOutputId: activeOutput?.deviceId || '',
+    hasExplicitSelection,
+    usedDefaultFallback: hasExplicitSelection && !matchedRequestedOutput,
+  };
 }
 
 function getMonitorProfile(outputDevices, selectedOutputId) {
@@ -193,6 +211,7 @@ function AudioSettings({ onClose, openTraceId = null }) {
   const selectedOutputRef = useRef(selectedOutput);
   const processingModeRef = useRef(processingMode);
   const noiseSuppressionRef = useRef(noiseSuppression);
+  const skipSelectedOutputSyncRestartRef = useRef(false);
   const meterFillRef = useRef(null);
   const meterValueRef = useRef(null);
   const meterStatusRef = useRef(null);
@@ -292,15 +311,22 @@ function AudioSettings({ onClose, openTraceId = null }) {
   }, []);
 
   const handleOutputChange = (deviceId) => {
+    const outputSelection = resolveOutputSelection(outputDevices, deviceId);
+    const monitorProfile = getMonitorProfile(outputDevices, deviceId);
+    skipSelectedOutputSyncRestartRef.current = true;
     selectedOutputRef.current = deviceId;
     selectOutput(deviceId);
     setOutputDevice(deviceId);
-  const monitorProfile = getMonitorProfile(outputDevices, deviceId);
-    const targetSinkId = deviceId || 'default';
+    restartTest();
 
     const previewAudio = previewAudioRef.current;
-    if (previewAudio?.setSinkId) {
-      previewAudio.setSinkId(targetSinkId).catch(() => {});
+    if (
+      previewAudio?.setSinkId
+      && outputSelection.hasExplicitSelection
+      && !outputSelection.usedDefaultFallback
+      && outputSelection.activeOutputId
+    ) {
+      previewAudio.setSinkId(outputSelection.activeOutputId).catch(() => {});
     }
     if (monitorGainRef.current) {
       monitorGainRef.current.gain.value = monitorProfile.gain;
@@ -310,10 +336,12 @@ function AudioSettings({ onClose, openTraceId = null }) {
       ...prev,
       playback: {
         ...(prev.playback || {}),
-        outputDeviceId: deviceId || null,
+        outputDeviceId: outputSelection.activeOutputId || null,
         outputDeviceLabel: monitorProfile.label || null,
         monitorProfile: monitorProfile.id,
         monitorGain: monitorProfile.gain,
+        requestedOutputDeviceId: deviceId || null,
+        usedDefaultOutputFallback: outputSelection.usedDefaultFallback,
       },
     } : prev);
   };
@@ -323,6 +351,7 @@ function AudioSettings({ onClose, openTraceId = null }) {
     gainNode,
     activeOutputId,
     monitorProfile,
+    preferDirectMonitor = false,
   }) => {
     const previewStart = performance.now();
     const monitorGain = ctx.createGain();
@@ -333,7 +362,7 @@ function AudioSettings({ onClose, openTraceId = null }) {
     gainNode.connect(stereoMonitor, 0, 1);
     stereoMonitor.connect(monitorGain);
 
-    if (!activeOutputId) {
+    if (preferDirectMonitor || !activeOutputId) {
       monitorGain.connect(ctx.destination);
       return {
         mode: 'direct',
@@ -351,10 +380,37 @@ function AudioSettings({ onClose, openTraceId = null }) {
     previewAudio.autoplay = true;
     previewAudio.playsInline = true;
     previewAudio.volume = 1;
+    previewAudio.muted = false;
     previewAudioRef.current = previewAudio;
 
-    if (previewAudio.setSinkId) {
-      await previewAudio.setSinkId(activeOutputId).catch(() => {});
+    if (typeof previewAudio.setSinkId !== 'function') {
+      clearPreviewPlayback();
+      try {
+        monitorGain.disconnect(previewDestination);
+      } catch {}
+      monitorGain.connect(ctx.destination);
+      return {
+        mode: 'direct-fallback',
+        playbackState: 'live-playing',
+        playbackError: 'Selected output routing is unavailable here. Monitoring through the system default output instead.',
+        monitorSetupMs: roundMs(performance.now() - previewStart),
+      };
+    }
+
+    try {
+      await previewAudio.setSinkId(activeOutputId);
+    } catch (sinkErr) {
+      clearPreviewPlayback();
+      try {
+        monitorGain.disconnect(previewDestination);
+      } catch {}
+      monitorGain.connect(ctx.destination);
+      return {
+        mode: 'direct-fallback',
+        playbackState: 'live-playing',
+        playbackError: sinkErr?.message || 'Selected output is unavailable. Monitoring through the system default output instead.',
+        monitorSetupMs: roundMs(performance.now() - previewStart),
+      };
     }
 
     let playbackState = 'starting';
@@ -375,8 +431,13 @@ function AudioSettings({ onClose, openTraceId = null }) {
       await previewAudio.play();
       playbackState = 'live-playing';
     } catch (previewErr) {
-      playbackState = 'live-blocked';
-      playbackError = previewErr?.message || 'Live monitor playback failed';
+      clearPreviewPlayback();
+      try {
+        monitorGain.disconnect(previewDestination);
+      } catch {}
+      monitorGain.connect(ctx.destination);
+      playbackState = 'live-playing';
+      playbackError = previewErr?.message || 'Selected output monitor failed, so monitoring is using the system default output.';
     }
 
     return {
@@ -385,7 +446,7 @@ function AudioSettings({ onClose, openTraceId = null }) {
       playbackError,
       monitorSetupMs: roundMs(performance.now() - previewStart),
     };
-  }, []);
+  }, [clearPreviewPlayback]);
 
   const stopTest = useCallback(async () => {
     testRunIdRef.current += 1;
@@ -463,6 +524,9 @@ function AudioSettings({ onClose, openTraceId = null }) {
     activeVoiceMode,
     activeOutputId,
     monitorProfile,
+    preferDirectMonitor,
+    requestedOutputDeviceId,
+    usedDefaultOutputFallback,
     noiseSuppressionEnabled,
     runId,
     testStart,
@@ -594,6 +658,7 @@ function AudioSettings({ onClose, openTraceId = null }) {
         gainNode: gain,
         activeOutputId,
         monitorProfile,
+        preferDirectMonitor,
       });
 
       helperMetadata = await helperStartPromise;
@@ -644,6 +709,8 @@ function AudioSettings({ onClose, openTraceId = null }) {
           outputDeviceLabel: monitorProfile.label || null,
           monitorProfile: monitorProfile.id,
           monitorGain: monitorProfile.gain,
+          requestedOutputDeviceId: requestedOutputDeviceId || null,
+          usedDefaultOutputFallback,
         },
         timingsMs: {
           audioGraphSetup: audioGraphSetupMs,
@@ -682,7 +749,8 @@ function AudioSettings({ onClose, openTraceId = null }) {
     const activeVoiceMode = processingModeRef.current || VOICE_PROCESSING_MODES.STANDARD;
     const useRawMicPath = isUltraLowLatencyMode(activeVoiceMode);
     const activeInputId = selectedInputRef.current;
-    const activeOutputId = selectedOutputRef.current;
+    const outputSelection = resolveOutputSelection(outputDevices, selectedOutputRef.current);
+    const activeOutputId = outputSelection.activeOutputId;
     const monitorProfile = getMonitorProfile(outputDevices, activeOutputId);
     const noiseSuppressionEnabled = useRawMicPath ? false : noiseSuppressionRef.current;
     const shouldUseAppleVoiceProcessing =
@@ -751,6 +819,8 @@ function AudioSettings({ onClose, openTraceId = null }) {
             outputDeviceLabel: monitorProfile.label || null,
             monitorProfile: monitorProfile.id,
             monitorGain: monitorProfile.gain,
+            requestedOutputDeviceId: selectedOutputRef.current || null,
+            usedDefaultOutputFallback: outputSelection.usedDefaultFallback,
           },
         });
 
@@ -761,6 +831,9 @@ function AudioSettings({ onClose, openTraceId = null }) {
             activeVoiceMode,
             activeOutputId,
             monitorProfile,
+            preferDirectMonitor: !outputSelection.hasExplicitSelection || outputSelection.usedDefaultFallback,
+            requestedOutputDeviceId: selectedOutputRef.current,
+            usedDefaultOutputFallback: outputSelection.usedDefaultFallback,
             noiseSuppressionEnabled,
             runId,
             testStart,
@@ -888,6 +961,7 @@ function AudioSettings({ onClose, openTraceId = null }) {
         gainNode: gain,
         activeOutputId,
         monitorProfile,
+        preferDirectMonitor: !outputSelection.hasExplicitSelection || outputSelection.usedDefaultFallback,
       });
       monitorSetupMs = monitorResult.monitorSetupMs;
       monitorPlaybackState = monitorResult.playbackState;
@@ -923,6 +997,8 @@ function AudioSettings({ onClose, openTraceId = null }) {
           outputDeviceLabel: monitorProfile.label || null,
           monitorProfile: monitorProfile.id,
           monitorGain: monitorProfile.gain,
+          requestedOutputDeviceId: selectedOutputRef.current || null,
+          usedDefaultOutputFallback: outputSelection.usedDefaultFallback,
         },
         timingsMs: {
           getUserMedia: getUserMediaMs,
@@ -1069,6 +1145,16 @@ function AudioSettings({ onClose, openTraceId = null }) {
       startTest();
     });
   }, [startTest, stopTest, testing]);
+
+  useEffect(() => {
+    if (skipSelectedOutputSyncRestartRef.current) {
+      skipSelectedOutputSyncRestartRef.current = false;
+      return;
+    }
+    if (testing) {
+      restartTest();
+    }
+  }, [selectedOutput, restartTest, testing]);
 
   useEffect(() => {
     return () => {

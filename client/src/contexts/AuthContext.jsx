@@ -6,7 +6,6 @@ import { publishProfile, uploadImage } from '../nostr/profilePublisher';
 import {
   connectWithBunkerURI,
   decodeNsec,
-  persistNsec,
   activateNsec,
   signWithNsec,
   disconnect as disconnectSigner,
@@ -41,6 +40,29 @@ const LOGIN_COMPAT_KIND = 1;
 const LOGIN_COMPAT_CONTENT = '/guild login';
 const LOGIN_COMPAT_CLIENT = '/guild';
 const AUTH_USER_UPDATED_EVENT = 'guild:auth-user-updated';
+const INITIAL_AUTH_UNSET = Symbol('initial-auth-unset');
+
+function loadRecoverableStoredAuth() {
+  try {
+    const stored = localStorage.getItem('auth');
+    if (!stored) return null;
+
+    const authData = JSON.parse(stored);
+    if (getSigner()) {
+      return authData;
+    }
+
+    pushNip46Trace('session.restore.expired', {
+      reason: 'session_only_signer_missing_after_restart',
+      npub: redactTraceValue(authData?.npub),
+    }, 'warn');
+    localStorage.removeItem('auth');
+    return null;
+  } catch {
+    localStorage.removeItem('auth');
+    return null;
+  }
+}
 
 async function loadProfileForLogin(pubkey) {
   pushNip46Trace('profile.lookup.start', {
@@ -390,17 +412,17 @@ async function _authenticateWithServer(pubkey, npub, signerOrSecretKey) {
 export function AuthProvider({ children }) {
   const secureStartupAttemptRef = useRef(0);
   const profileSyncSessionRef = useRef(null);
+  const initialUserRef = useRef(INITIAL_AUTH_UNSET);
+
+  if (initialUserRef.current === INITIAL_AUTH_UNSET) {
+    initialUserRef.current = loadRecoverableStoredAuth();
+  }
+
   const [user, setUser] = useState(() => {
-    try {
-      const stored = localStorage.getItem('auth');
-      return stored ? JSON.parse(stored) : null;
-    } catch {
-      localStorage.removeItem('auth');
-      return null;
-    }
+    return initialUserRef.current;
   });
   const [cryptoStatus, setCryptoStatus] = useState(() => (
-    localStorage.getItem('auth') ? 'booting' : 'signed_out'
+    initialUserRef.current ? 'booting' : 'signed_out'
   ));
   const [cryptoError, setCryptoError] = useState(null);
 
@@ -634,7 +656,6 @@ export function AuthProvider({ children }) {
       });
       const authData = await _authenticateWithServer(pubkey, npub, secretKey);
       await ensureSecureLogin(authData);
-      await persistNsec(nsecStr);
       setUser(authData);
       return authData;
     } catch (err) {
@@ -725,7 +746,6 @@ export function AuthProvider({ children }) {
         profileResult = nextProfile;
       }
 
-      await persistNsec(nsec);
       setUser(nextAuthData);
       return { authData: nextAuthData, profile: profileResult };
     } catch (err) {

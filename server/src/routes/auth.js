@@ -188,25 +188,26 @@ router.post('/nostr', (req, res) => {
     let user = getUserByNpub.get(npub);
     if (!user) {
       const id = uuidv4();
-      let name = (displayName && displayName.trim())
+      const name = (displayName && displayName.trim())
         ? displayName.trim().slice(0, 30)
         : npub.slice(0, 8) + '...' + npub.slice(-4);
       const avatarColor = hashColor(npub);
       const userLud16 = (lud16 && lud16.trim()) ? lud16.trim() : null;
       const pic = sanitizeProfilePictureUrl(profilePicture);
 
-      // Handle display name collisions with existing usernames
       try {
         createUserWithNpub.run(id, name, avatarColor, npub, userLud16, pic);
       } catch (insertErr) {
-        if (insertErr.message && insertErr.message.includes('UNIQUE constraint failed')) {
-          name = name.slice(0, 25) + '_' + crypto.randomBytes(3).toString('hex');
-          createUserWithNpub.run(id, name, avatarColor, npub, userLud16, pic);
-        } else {
-          throw insertErr;
+        if (insertErr?.message?.includes('UNIQUE constraint failed')) {
+          user = getUserByNpub.get(npub);
+          if (!user) {
+            throw insertErr;
+          }
         }
       }
-      user = { id, username: name, avatar_color: avatarColor, npub, lud16: userLud16, profile_picture: pic };
+      if (!user) {
+        user = { id, username: name, avatar_color: avatarColor, npub, lud16: userLud16, profile_picture: pic };
+      }
     } else {
       // Update profile metadata if changed
       if (lud16 && lud16.trim() && lud16.trim() !== user.lud16) {

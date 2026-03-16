@@ -41,10 +41,13 @@ Open on the host:
 - `22/tcp` for SSH
 - `80/tcp` for ACME / HTTP redirect
 - `443/tcp` for HTTPS
-- `10000-10100/udp` for mediasoup RTP
-- `10000-10100/tcp` for mediasoup fallback transport
+- `10000-10100/udp` for production mediasoup RTP
+- `10000-10100/tcp` for production mediasoup fallback transport
+- `10101-10200/udp` for staging mediasoup RTP
+- `10101-10200/tcp` for staging mediasoup fallback transport
 
 Do not expose `3001` publicly once Caddy is in front.
+Do not expose `3002` publicly either if staging lives on the same box.
 
 ## Server Layout
 
@@ -56,13 +59,24 @@ Use this layout on the host:
   server/
   uploads/
   updates/
+/opt/guild-staging
+  client/
+  server/
+  uploads/
+  updates/
 ```
 
-The server writes here by default:
+Production writes here by default:
 
 - database: `/opt/guild/server/data/messenger.db`
 - uploads: `/opt/guild/uploads`
 - updates: `/opt/guild/updates`
+
+Staging writes here by default:
+
+- database: `/opt/guild-staging/server/data/messenger.db`
+- uploads: `/opt/guild-staging/uploads`
+- updates: `/opt/guild-staging/updates`
 
 ## Initial Provisioning
 
@@ -86,8 +100,8 @@ Create the app user and directories:
 
 ```bash
 adduser --system --group --home /opt/guild guild
-mkdir -p /opt/guild /etc/guild
-chown -R guild:guild /opt/guild /etc/guild
+mkdir -p /opt/guild /opt/guild-staging /etc/guild
+chown -R guild:guild /opt/guild /opt/guild-staging /etc/guild
 ```
 
 ## Copying The App To The Server
@@ -122,22 +136,36 @@ automatically.
 
 ## Environment
 
-Copy the example env file:
+Production env:
 
 ```bash
 cp /opt/guild/ops/flokinet/guild-server.env.example /etc/guild/guild-server.env
 nano /etc/guild/guild-server.env
 ```
 
-Minimum fields to set:
+Staging env:
+
+```bash
+cp /opt/guild-staging/ops/flokinet/guild-staging.env.example /etc/guild/guild-staging.env
+nano /etc/guild/guild-staging.env
+```
+
+Minimum fields to set for both:
 
 - `ANNOUNCED_IP`
 - `ALLOWED_ORIGINS`
 - `DEV_DASHBOARD_KEY`
 
+Important staging-only fields:
+
+- `PORT=3002`
+- `MEDIASOUP_RTC_MIN_PORT=10101`
+- `MEDIASOUP_RTC_MAX_PORT=10200`
+- staging-only hostname in `ALLOWED_ORIGINS`
+
 ## systemd
 
-Copy the unit file into place:
+Production unit:
 
 ```bash
 cp /opt/guild/ops/flokinet/guild-server.service /etc/systemd/system/guild-server.service
@@ -147,10 +175,21 @@ systemctl start guild-server
 systemctl status guild-server
 ```
 
+Staging unit:
+
+```bash
+cp /opt/guild-staging/ops/flokinet/guild-staging.service /etc/systemd/system/guild-staging.service
+systemctl daemon-reload
+systemctl enable guild-staging
+systemctl start guild-staging
+systemctl status guild-staging
+```
+
 Useful logs:
 
 ```bash
 journalctl -u guild-server -f
+journalctl -u guild-staging -f
 ```
 
 ## Reverse Proxy
@@ -163,7 +202,8 @@ nano /etc/caddy/Caddyfile
 systemctl reload caddy
 ```
 
-Point DNS to the server before reloading Caddy so ACME can issue the cert.
+Point both production and staging DNS names at the server before reloading
+Caddy so ACME can issue the certs.
 
 ## Firewall
 
@@ -175,8 +215,8 @@ ufw default allow outgoing
 ufw allow 22/tcp
 ufw allow 80/tcp
 ufw allow 443/tcp
-ufw allow 10000:10100/udp
-ufw allow 10000:10100/tcp
+ufw allow 10000:10200/udp
+ufw allow 10000:10200/tcp
 ufw enable
 ```
 
@@ -186,10 +226,28 @@ On the host:
 
 ```bash
 curl -I http://127.0.0.1:3001/api/version
-curl -I https://YOUR_DOMAIN/api/version
+curl -I http://127.0.0.1:3002/api/version
+curl -I https://YOUR_PROD_DOMAIN/api/version
+curl -I https://YOUR_STAGING_DOMAIN/api/version
 ```
 
-The mediasoup worker should log the public `ANNOUNCED_IP` on startup.
+Each mediasoup worker should log the public `ANNOUNCED_IP` on startup.
+
+## Staging-First Deploy Flow
+
+If production is already live, use this order:
+
+1. `ops/flokinet/bootstrap-box.sh --host YOUR_SERVER_IP --user YOUR_SSH_USER`
+2. `ops/flokinet/deploy-box.sh --host YOUR_SERVER_IP --user YOUR_SSH_USER --target staging`
+3. Fill in `/etc/guild/guild-staging.env`
+4. Start `guild-staging`
+5. Point a staging hostname such as `staging.guild.example.com` to the box
+6. Confirm staging voice/chat/update flows before touching production
+
+When you are happy with staging:
+
+1. `ops/flokinet/deploy-box.sh --host YOUR_SERVER_IP --user YOUR_SSH_USER --target production`
+2. Restart only `guild-server`
 
 ## Suggested Next Sequence
 
@@ -206,12 +264,12 @@ The mediasoup worker should log the public `ANNOUNCED_IP` on startup.
 This folder now includes two helper scripts:
 
 - `bootstrap-box.sh`
-  - installs system packages, Node 24, and creates `/opt/guild`
+  - installs system packages, Node 24, and creates both app roots
   - dry-run by default
 - `deploy-box.sh`
   - rsyncs the repo to a remote staging directory
-  - syncs that staging copy into `/opt/guild`
-  - installs server dependencies and the `guild-server` unit
+  - syncs that staged copy into either `/opt/guild` or `/opt/guild-staging`
+  - installs server dependencies and the matching systemd unit
   - dry-run by default
 
 Example:
@@ -219,11 +277,11 @@ Example:
 ```bash
 # From the local repo root
 ops/flokinet/bootstrap-box.sh --host YOUR_SERVER_IP --user YOUR_SSH_USER
-ops/flokinet/deploy-box.sh --host YOUR_SERVER_IP --user YOUR_SSH_USER
+ops/flokinet/deploy-box.sh --host YOUR_SERVER_IP --user YOUR_SSH_USER --target staging
 
 # Apply once the dry-run output looks right
 ops/flokinet/bootstrap-box.sh --host YOUR_SERVER_IP --user YOUR_SSH_USER --apply
-ops/flokinet/deploy-box.sh --host YOUR_SERVER_IP --user YOUR_SSH_USER --apply
+ops/flokinet/deploy-box.sh --host YOUR_SERVER_IP --user YOUR_SSH_USER --target staging --apply
 ```
 
 If the remote SSH user requires a sudo password, both scripts are meant to be
