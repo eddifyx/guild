@@ -592,12 +592,17 @@ export function activateNsec(secretKey) {
  * Persist nsec encrypted via Electron safeStorage.
  */
 export async function persistNsec(nsecStr) {
-  if (window.electronCrypto && await window.electronCrypto.isEncryptionAvailable()) {
-    const encrypted = await window.electronCrypto.encryptString(nsecStr);
-    localStorage.setItem('nostr_nsec_enc', encrypted);
-  } else {
-    console.warn('[nsec] Electron safeStorage unavailable — nsec will not persist');
+  try {
+    if (window.electronCrypto && await window.electronCrypto.isEncryptionAvailable()) {
+      const encrypted = await window.electronCrypto.encryptString(nsecStr);
+      localStorage.setItem('nostr_nsec_enc', encrypted);
+      return;
+    }
+  } catch (err) {
+    console.warn('[nsec] Electron safeStorage unavailable or denied — nsec will not persist:', err);
   }
+
+  console.warn('[nsec] Electron safeStorage unavailable — nsec will not persist');
 }
 
 /**
@@ -663,22 +668,31 @@ async function _persistSession(bunkerPointer, clientSecretKey = _clientSecretKey
     clientSecretKey: Array.from(clientSecretKey),
   });
 
-  if (window.electronCrypto && await window.electronCrypto.isEncryptionAvailable()) {
-    const encrypted = await window.electronCrypto.encryptString(sessionData);
-    localStorage.setItem('nostr_nip46_session_enc', encrypted);
-    localStorage.removeItem('nostr_nip46_session');
-    pushNip46Trace('session.persisted', {
-      bunkerPubkey: redactTraceValue(bunkerPointer?.pubkey),
-      relays: bunkerPointer?.relays || [],
-    });
-  } else {
-    // No safeStorage — cannot persist session securely. User will need to
-    // re-enter bunker URI on next app launch.
+  try {
+    if (window.electronCrypto && await window.electronCrypto.isEncryptionAvailable()) {
+      const encrypted = await window.electronCrypto.encryptString(sessionData);
+      localStorage.setItem('nostr_nip46_session_enc', encrypted);
+      localStorage.removeItem('nostr_nip46_session');
+      pushNip46Trace('session.persisted', {
+        bunkerPubkey: redactTraceValue(bunkerPointer?.pubkey),
+        relays: bunkerPointer?.relays || [],
+      });
+      return;
+    }
+  } catch (err) {
     pushNip46Trace('session.persist_skipped', {
-      reason: 'safe_storage_unavailable',
+      reason: 'safe_storage_denied',
+      error: summarizeError(err),
     }, 'warn');
-    console.warn('[NIP-46] Electron safeStorage unavailable — session will not persist across restarts');
+    console.warn('[NIP-46] Electron safeStorage denied — session will not persist across restarts:', err);
   }
+
+  // No safeStorage — cannot persist session securely. User will need to
+  // re-enter bunker URI on next app launch.
+  pushNip46Trace('session.persist_skipped', {
+    reason: 'safe_storage_unavailable',
+  }, 'warn');
+  console.warn('[NIP-46] Electron safeStorage unavailable — session will not persist across restarts');
 }
 
 async function _loadSession() {

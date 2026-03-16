@@ -133,6 +133,15 @@ async function fetchLoginChallenge() {
     throw new Error(payload?.error || response.statusText || 'Request failed');
   }
 
+  if (typeof payload?.challenge !== 'string' || !payload.challenge.trim()) {
+    pushNip46Trace('server.challenge.invalid_payload', {
+      status: response.status,
+      hasChallenge: Boolean(payload?.challenge),
+      payloadKeys: payload && typeof payload === 'object' ? Object.keys(payload) : [],
+    }, 'error');
+    throw new Error(`The server at ${getServerUrl()} is not serving a valid /guild auth challenge.`);
+  }
+
   return payload;
 }
 

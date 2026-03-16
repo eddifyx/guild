@@ -1076,14 +1076,28 @@ ipcMain.handle('show-notification', (event, { title, body }) => {
 });
 
 // E2E Encryption: safeStorage IPC for master key persistence via OS keychain
-ipcMain.handle('safe-storage-available', () => safeStorage.isEncryptionAvailable());
+ipcMain.handle('safe-storage-available', () => {
+  try {
+    return safeStorage.isEncryptionAvailable();
+  } catch {
+    return false;
+  }
+});
 ipcMain.handle('safe-storage-encrypt', (event, plaintext) => {
-  if (!safeStorage.isEncryptionAvailable()) throw new Error('safeStorage not available');
-  return safeStorage.encryptString(plaintext).toString('base64');
+  try {
+    if (!safeStorage.isEncryptionAvailable()) throw new Error('safeStorage not available');
+    return safeStorage.encryptString(plaintext).toString('base64');
+  } catch (error) {
+    throw new Error(`safeStorage encrypt failed: ${error?.message || 'unknown error'}`);
+  }
 });
 ipcMain.handle('safe-storage-decrypt', (event, encrypted) => {
-  if (!safeStorage.isEncryptionAvailable()) throw new Error('safeStorage not available');
-  return safeStorage.decryptString(Buffer.from(encrypted, 'base64'));
+  try {
+    if (!safeStorage.isEncryptionAvailable()) throw new Error('safeStorage not available');
+    return safeStorage.decryptString(Buffer.from(encrypted, 'base64'));
+  } catch (error) {
+    throw new Error(`safeStorage decrypt failed: ${error?.message || 'unknown error'}`);
+  }
 });
 
 ipcMain.handle('message-cache:get', (event, userId, messageId) => {

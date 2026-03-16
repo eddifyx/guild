@@ -1,5 +1,6 @@
 const path = require('path');
 const fs = require('fs');
+const { execFileSync } = require('child_process');
 const { VitePlugin } = require('@electron-forge/plugin-vite');
 
 // Native modules that must be copied into the packaged app.
@@ -171,6 +172,74 @@ function copyRuntimeFilesIntoPackagedApp(outputPath, platform) {
   }
 }
 
+function walkFiles(rootDir, predicate, results = []) {
+  if (!fs.existsSync(rootDir)) return results;
+
+  for (const entry of fs.readdirSync(rootDir, { withFileTypes: true })) {
+    const fullPath = path.join(rootDir, entry.name);
+    if (entry.isDirectory()) {
+      walkFiles(fullPath, predicate, results);
+      continue;
+    }
+    if (predicate(fullPath, entry)) {
+      results.push(fullPath);
+    }
+  }
+
+  return results;
+}
+
+function signPackagedDarwinApp(outputPath, platform) {
+  if (platform !== 'darwin') return;
+  if (process.env.GUILD_MAC_SIGN !== '1') return;
+
+  const identity = process.env.GUILD_MAC_SIGN_IDENTITY || 'Developer ID Application';
+  const appBundlePath = outputPath.endsWith('.app') ? outputPath : path.join(outputPath, `${APP_PACKAGE_NAME}.app`);
+  const resourcesDir = path.join(appBundlePath, 'Contents', 'Resources');
+  const vendorModulesDir = path.join(resourcesDir, 'vendor', 'node_modules');
+  const appleVoiceHelperDir = path.join(resourcesDir, APPLE_VOICE_HELPER_RELATIVE_DIR, 'bin');
+
+  const nestedCodePaths = [
+    ...walkFiles(vendorModulesDir, (fullPath) => fullPath.endsWith('.node')),
+    ...walkFiles(appleVoiceHelperDir, (fullPath) => {
+      try {
+        return (fs.statSync(fullPath).mode & 0o111) !== 0;
+      } catch {
+        return false;
+      }
+    }),
+  ].sort((a, b) => b.length - a.length);
+
+  for (const nestedPath of nestedCodePaths) {
+    execFileSync(
+      'codesign',
+      ['--force', '--sign', identity, '--timestamp', nestedPath],
+      { stdio: 'inherit' }
+    );
+  }
+
+  execFileSync(
+    'codesign',
+    [
+      '--force',
+      '--sign',
+      identity,
+      '--timestamp',
+      '--options',
+      'runtime',
+      '--preserve-metadata=entitlements,requirements,flags,runtime',
+      appBundlePath,
+    ],
+    { stdio: 'inherit' }
+  );
+
+  execFileSync(
+    'codesign',
+    ['--verify', '--deep', '--strict', appBundlePath],
+    { stdio: 'inherit' }
+  );
+}
+
 module.exports = {
   packagerConfig: {
     name: APP_PACKAGE_NAME,
@@ -208,6 +277,7 @@ module.exports = {
     postPackage: async (_config, packageResult) => {
       for (const outputPath of packageResult.outputPaths) {
         copyRuntimeFilesIntoPackagedApp(outputPath, packageResult.platform);
+        signPackagedDarwinApp(outputPath, packageResult.platform);
       }
     },
   },

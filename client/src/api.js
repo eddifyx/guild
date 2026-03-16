@@ -1,6 +1,9 @@
 /**
  * Returns true if a URL is a local/dev address (localhost, 127.0.0.1, 192.168.x.x, 10.x.x.x).
  */
+const PACKAGED_DEFAULT_SERVER_URL = (import.meta.env.VITE_DEFAULT_SERVER_URL || 'https://guild.app').replace(/\/+$/, '');
+const DEV_DEFAULT_SERVER_URL = 'http://localhost:3001';
+
 function isLocalUrl(url) {
   if (!url) return false;
   return /^https?:\/\/(localhost|127\.0\.0\.1|192\.168\.\d+\.\d+|10\.\d+\.\d+\.\d+)(:\d+)?/i.test(url);
@@ -28,7 +31,9 @@ export function setServerUrl(url) {
 }
 
 export function getServerUrl() {
-  return localStorage.getItem('serverUrl') || 'http://localhost:3001';
+  const stored = localStorage.getItem('serverUrl');
+  if (stored) return stored;
+  return import.meta.env.DEV ? DEV_DEFAULT_SERVER_URL : PACKAGED_DEFAULT_SERVER_URL;
 }
 
 function toAbsoluteServerUrl(url, serverUrl = getServerUrl()) {
