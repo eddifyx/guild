@@ -1,7 +1,7 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { memo, useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useSocket } from '../../contexts/SocketContext';
 import { useAuth } from '../../contexts/AuthContext';
-import { useVoiceContext } from '../../contexts/VoiceContext';
+import { useVoiceContext, useVoicePresenceContext } from '../../contexts/VoiceContext';
 import { useRooms } from '../../hooks/useRooms';
 import { useNotifications } from '../../hooks/useNotifications';
 import { useOnlineUsers } from '../../hooks/useOnlineUsers';
@@ -22,6 +22,31 @@ import GuildDashboard from '../Guild/GuildDashboard';
 import VoiceChannelView from '../Voice/VoiceChannelView';
 import UpdateOverlay from '../Common/UpdateOverlay';
 import VerifyIdentityModal from '../Chat/VerifyIdentityModal';
+import { cancelPerfTrace, startPerfTrace } from '../../utils/devPerf';
+
+const MemoSidebar = memo(Sidebar);
+
+const MainContentPane = memo(function MainContentPane({ conversation, onSelectDM, openTraceId }) {
+  if (conversation?.type === 'assets') {
+    return <AssetDumpView />;
+  }
+  if (conversation?.type === 'addons') {
+    return <AddonView />;
+  }
+  if (conversation?.type === 'stream') {
+    return <StreamView userId={conversation.id} />;
+  }
+  if (conversation?.type === 'nostr-profile') {
+    return <NostrProfileView />;
+  }
+  if (conversation?.type === 'voice') {
+    return <VoiceChannelView channelId={conversation.id} />;
+  }
+  if (conversation) {
+    return <ChatView conversation={conversation} openTraceId={openTraceId} />;
+  }
+  return <GuildDashboard onSelectDM={onSelectDM} />;
+});
 
 export default function MainLayout() {
   const { socket } = useSocket();
@@ -29,7 +54,9 @@ export default function MainLayout() {
   const { rooms, myRooms, createRoom, joinRoom, leaveRoom, renameRoom, deleteRoom, refreshRooms } = useRooms(currentGuild);
   const [conversation, setConversation] = useState(null);
   const [conversationName, setConversationName] = useState('');
+  const [conversationOpenTraceId, setConversationOpenTraceId] = useState(null);
   const [updateAvailable, setUpdateAvailable] = useState(false);
+  const [latestVersionInfo, setLatestVersionInfo] = useState(null);
   const [appVersion, setAppVersion] = useState('');
   const [showUpdateOverlay, setShowUpdateOverlay] = useState(false);
   const [versionToast, setVersionToast] = useState(null);
@@ -49,27 +76,49 @@ export default function MainLayout() {
   // Clear warning if E2E initializes later (e.g. reconnect succeeds)
   useEffect(() => {
     if (e2eWarning && isE2EInitialized()) setE2eWarning(false);
-  });
+  }, [e2eWarning]);
+
+  const refreshLatestVersionInfo = useCallback(async () => {
+    const info = await checkLatestVersion();
+    setLatestVersionInfo(info);
+    setUpdateAvailable(!!info?.hasUpdate);
+    return info;
+  }, []);
 
   useNotifications(conversation);
   const { unreadCounts, clearUnread } = useUnreadDMs(conversation);
   const { unreadRoomCounts, clearUnreadRoom } = useUnreadRooms(conversation);
   const { user } = useAuth();
-  const { screenSharing, voiceChannels, channelId, peers } = useVoiceContext();
+  const { screenSharing, voiceChannels, channelId } = useVoiceContext();
+  const { peers } = useVoicePresenceContext();
 
-  const activeVoiceChannel = channelId
-    ? voiceChannels.find(ch => ch.id === channelId) || null
-    : null;
-  const activePeerStreamerId = !screenSharing
-    ? (Object.entries(peers || {}).find(([, state]) => state?.screenSharing)?.[0] || null)
-    : null;
-  const activeRemoteStreamer = !screenSharing
-    ? (activePeerStreamerId
-      ? ((activeVoiceChannel?.participants || []).find(p => p.userId === activePeerStreamerId)
-        || voiceChannels.flatMap(ch => ch.participants || []).find(p => p.userId === activePeerStreamerId)
-        || { userId: activePeerStreamerId, username: 'Stream' })
-      : ((activeVoiceChannel?.participants || []).find(p => p.screenSharing && p.userId !== user?.userId) || null))
-    : null;
+  const activeVoiceChannel = useMemo(() => (
+    channelId ? voiceChannels.find((ch) => ch.id === channelId) || null : null
+  ), [channelId, voiceChannels]);
+  const allVoiceParticipants = useMemo(
+    () => voiceChannels.flatMap((ch) => ch.participants || []),
+    [voiceChannels]
+  );
+  const activePeerStreamerId = useMemo(() => (
+    screenSharing
+      ? null
+      : (Object.entries(peers || {}).find(([, state]) => state?.screenSharing)?.[0] || null)
+  ), [screenSharing, peers]);
+  const activeRemoteStreamer = useMemo(() => {
+    if (screenSharing) return null;
+
+    if (activePeerStreamerId) {
+      return (
+        (activeVoiceChannel?.participants || []).find((participant) => participant.userId === activePeerStreamerId)
+        || allVoiceParticipants.find((participant) => participant.userId === activePeerStreamerId)
+        || { userId: activePeerStreamerId, username: 'Stream' }
+      );
+    }
+
+    return ((activeVoiceChannel?.participants || []).find(
+      (participant) => participant.screenSharing && participant.userId !== user?.userId
+    ) || null);
+  }, [screenSharing, activePeerStreamerId, activeVoiceChannel, allVoiceParticipants, user?.userId]);
   const streamConversationMatchesActiveVoice = conversation?.type === 'stream'
     && !!channelId
     && !!activeVoiceChannel
@@ -79,6 +128,7 @@ export default function MainLayout() {
   const prevConversationRef = useRef(undefined);
   const prevConversationNameRef = useRef(undefined);
   const prevJoinedVoiceChannelIdRef = useRef(null);
+  const conversationOpenTraceRef = useRef(null);
   useEffect(() => {
     if (screenSharing) {
       prevConversationRef.current = conversation;
@@ -145,13 +195,11 @@ export default function MainLayout() {
   // Fetch local version + check server for newer version on mount + every 30 minutes
   useEffect(() => {
     window.electronAPI?.getAppVersion?.().then(v => setAppVersion(v || ''));
-    const check = () => checkLatestVersion().then(({ hasUpdate }) => {
-      if (hasUpdate) setUpdateAvailable(true);
-    });
+    const check = () => refreshLatestVersionInfo().catch(() => {});
     check();
     const interval = setInterval(check, 30 * 60 * 1000);
     return () => clearInterval(interval);
-  }, []);
+  }, [refreshLatestVersionInfo]);
 
   // Auto-join rooms via socket when connecting
   useEffect(() => {
@@ -210,48 +258,110 @@ export default function MainLayout() {
     };
   }, [socket, conversation]);
 
-  const handleSelectRoom = (room) => {
-    if (!room) {
-      setConversation(null);
-      setConversationName('');
+  const setConversationState = useCallback((nextConversation, nextConversationName = '') => {
+    setConversation((prev) => {
+      const prevType = prev?.type || null;
+      const prevId = prev?.id || null;
+      const prevNpub = prev?.npub || null;
+      const nextType = nextConversation?.type || null;
+      const nextId = nextConversation?.id || null;
+      const nextNpub = nextConversation?.npub || null;
+      if (prevType === nextType && prevId === nextId && prevNpub === nextNpub) {
+        return prev;
+      }
+      return nextConversation;
+    });
+    setConversationName((prev) => (prev === nextConversationName ? prev : nextConversationName));
+  }, []);
+
+  const setConversationPerfTrace = useCallback((nextTraceId) => {
+    if (
+      conversationOpenTraceRef.current
+      && conversationOpenTraceRef.current !== nextTraceId
+    ) {
+      cancelPerfTrace(conversationOpenTraceRef.current, {
+        reason: 'superseded',
+      });
+    }
+    conversationOpenTraceRef.current = nextTraceId;
+    setConversationOpenTraceId(nextTraceId);
+  }, []);
+
+  const clearConversationPerfTrace = useCallback((reason = 'navigated-away') => {
+    if (conversationOpenTraceRef.current) {
+      cancelPerfTrace(conversationOpenTraceRef.current, {
+        reason,
+      });
+      conversationOpenTraceRef.current = null;
+    }
+    setConversationOpenTraceId(null);
+  }, []);
+
+  useEffect(() => {
+    if (conversation?.type === 'room' || conversation?.type === 'dm') {
       return;
     }
+    if (conversationOpenTraceRef.current) {
+      clearConversationPerfTrace('non-chat-auto-nav');
+    }
+  }, [conversation?.type, clearConversationPerfTrace]);
+
+  const handleSelectRoom = useCallback((room) => {
+    if (!room) {
+      clearConversationPerfTrace('cleared-conversation');
+      setConversationState(null, '');
+      return;
+    }
+    setConversationPerfTrace(startPerfTrace('conversation-open', {
+      surface: 'main-layout',
+      conversationType: 'room',
+      conversationId: room.id,
+    }));
     if (socket) socket.emit('room:join', { roomId: room.id });
-    setConversation({ type: 'room', id: room.id });
-    setConversationName(room.name);
+    setConversationState({ type: 'room', id: room.id }, room.name);
     clearUnreadRoom(room.id);
-  };
+  }, [clearConversationPerfTrace, clearUnreadRoom, setConversationPerfTrace, setConversationState, socket]);
 
-  const handleSelectDM = (conv) => {
-    setConversation({ type: 'dm', id: conv.other_user_id, npub: conv.other_npub || null });
-    setConversationName(conv.other_username);
+  const handleSelectDM = useCallback((conv) => {
+    setConversationPerfTrace(startPerfTrace('conversation-open', {
+      surface: 'main-layout',
+      conversationType: 'dm',
+      conversationId: conv.other_user_id,
+    }));
+    setConversationState(
+      { type: 'dm', id: conv.other_user_id, npub: conv.other_npub || null },
+      conv.other_username
+    );
     clearUnread(conv.other_user_id);
-  };
+  }, [clearUnread, setConversationPerfTrace, setConversationState]);
 
-  const handleSelectAssetDump = () => {
-    setConversation({ type: 'assets', id: 'dump' });
-    setConversationName('Asset Dumping Grounds');
-  };
+  const handleSelectAssetDump = useCallback(() => {
+    clearConversationPerfTrace('asset-dump');
+    setConversationState({ type: 'assets', id: 'dump' }, 'Asset Dumping Grounds');
+  }, [clearConversationPerfTrace, setConversationState]);
 
-  const handleSelectAddons = () => {
-    setConversation({ type: 'addons', id: 'addons' });
-    setConversationName('Addons');
-  };
+  const handleSelectAddons = useCallback(() => {
+    clearConversationPerfTrace('addons');
+    setConversationState({ type: 'addons', id: 'addons' }, 'Addons');
+  }, [clearConversationPerfTrace, setConversationState]);
 
-  const handleSelectStream = (userId, username) => {
-    setConversation({ type: 'stream', id: userId || null });
-    setConversationName(userId ? `${username}'s Stream` : 'Stream');
-  };
+  const handleSelectStream = useCallback((userId, username) => {
+    clearConversationPerfTrace('stream');
+    setConversationState(
+      { type: 'stream', id: userId || null },
+      userId ? `${username}'s Stream` : 'Stream'
+    );
+  }, [clearConversationPerfTrace, setConversationState]);
 
-  const handleSelectNostrProfile = () => {
-    setConversation({ type: 'nostr-profile' });
-    setConversationName(user?.username || 'Profile');
-  };
+  const handleSelectNostrProfile = useCallback(() => {
+    clearConversationPerfTrace('nostr-profile');
+    setConversationState({ type: 'nostr-profile' }, user?.username || 'Profile');
+  }, [clearConversationPerfTrace, setConversationState, user?.username]);
 
-  const handleSelectVoiceChannel = (chId, chName) => {
-    setConversation({ type: 'voice', id: chId });
-    setConversationName(chName || 'Voice');
-  };
+  const handleSelectVoiceChannel = useCallback((chId, chName) => {
+    clearConversationPerfTrace('voice');
+    setConversationState({ type: 'voice', id: chId }, chName || 'Voice');
+  }, [clearConversationPerfTrace, setConversationState]);
 
   // Auto-navigate to the active voice or stream view when the joined voice channel changes.
   useEffect(() => {
@@ -360,6 +470,7 @@ export default function MainLayout() {
         <UpdateOverlay
           serverUrl={getServerUrl()}
           onDismiss={() => setShowUpdateOverlay(false)}
+          updateInfo={latestVersionInfo}
         />
       )}
       {/* Title bar — unified top bar with logo, channel info, and controls */}
@@ -548,11 +659,18 @@ export default function MainLayout() {
           <button
             onClick={() => {
               if (updateAvailable) {
-                setShowUpdateOverlay(true);
+                if (latestVersionInfo) {
+                  setShowUpdateOverlay(true);
+                } else {
+                  refreshLatestVersionInfo().then((info) => {
+                    if (info?.hasUpdate) {
+                      setShowUpdateOverlay(true);
+                    }
+                  });
+                }
               } else {
-                checkLatestVersion().then(({ hasUpdate, remoteVersion }) => {
-                  if (hasUpdate) {
-                    setUpdateAvailable(true);
+                refreshLatestVersionInfo().then((info) => {
+                  if (info?.hasUpdate) {
                     setShowUpdateOverlay(true);
                   } else {
                     setVersionToast(`You're up to date (v${appVersion})`);
@@ -680,7 +798,7 @@ export default function MainLayout() {
 
       {/* Content row */}
       <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
-        <Sidebar
+        <MemoSidebar
           rooms={rooms}
           myRooms={myRooms}
           createRoom={createRoom}
@@ -699,20 +817,11 @@ export default function MainLayout() {
           unreadRoomCounts={unreadRoomCounts}
         />
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0, overflow: 'hidden' }}>
-          {conversation?.type === 'assets'
-            ? <AssetDumpView />
-            : conversation?.type === 'addons'
-              ? <AddonView />
-              : conversation?.type === 'stream'
-                ? <StreamView userId={conversation.id} />
-                : conversation?.type === 'nostr-profile'
-                  ? <NostrProfileView />
-                  : conversation?.type === 'voice'
-                    ? <VoiceChannelView channelId={conversation.id} />
-                    : conversation
-                    ? <ChatView conversation={conversation} />
-                    : <GuildDashboard onSelectDM={handleSelectDM} />
-          }
+          <MainContentPane
+            conversation={conversation}
+            onSelectDM={handleSelectDM}
+            openTraceId={conversationOpenTraceId}
+          />
         </div>
       </div>
       {showVerifyIdentity && conversation?.type === 'dm' && (

@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useRef } from 'react';
+import { createContext, useContext, useEffect, useMemo, useRef } from 'react';
 import { useVoice } from '../hooks/useVoice';
 import { useVoiceChannels } from '../hooks/useVoiceChannels';
 import { useAudioDevices } from '../hooks/useAudioDevices';
@@ -8,6 +8,8 @@ import { playJoinChime, playLeaveChime, playStreamStartChime, playStreamStopChim
 import { setVoiceChannelParticipants } from '../crypto/voiceEncryption';
 
 const VoiceContext = createContext(null);
+const VoicePresenceContext = createContext(null);
+const VoiceSettingsContext = createContext(null);
 
 export function VoiceProvider({ children }) {
   const { user } = useAuth();
@@ -86,9 +88,100 @@ export function VoiceProvider({ children }) {
     prevSharersRef.current = sharers;
   }, [voice.channelId, channels.voiceChannels, user?.userId]);
 
+  const voiceValue = useMemo(() => ({
+    channelId: voice.channelId,
+    muted: voice.muted,
+    deafened: voice.deafened,
+    joinError: voice.joinError,
+    joinChannel: voice.joinChannel,
+    leaveChannel: voice.leaveChannel,
+    toggleMute: voice.toggleMute,
+    toggleDeafen: voice.toggleDeafen,
+    setUserVolume: voice.setUserVolume,
+    screenSharing: voice.screenSharing,
+    screenShareStream: voice.screenShareStream,
+    startScreenShare: voice.startScreenShare,
+    stopScreenShare: voice.stopScreenShare,
+    incomingScreenShares: voice.incomingScreenShares,
+    showSourcePicker: voice.showSourcePicker,
+    confirmScreenShare: voice.confirmScreenShare,
+    cancelSourcePicker: voice.cancelSourcePicker,
+    screenShareError: voice.screenShareError,
+    clearScreenShareError: voice.clearScreenShareError,
+    voiceE2E: voice.voiceE2E,
+    e2eWarning: voice.e2eWarning,
+    voiceChannels: channels.voiceChannels,
+    createVoiceChannel: channels.createVoiceChannel,
+    deleteVoiceChannel: channels.deleteVoiceChannel,
+  }), [
+    voice.channelId,
+    voice.muted,
+    voice.deafened,
+    voice.joinError,
+    voice.joinChannel,
+    voice.leaveChannel,
+    voice.toggleMute,
+    voice.toggleDeafen,
+    voice.setUserVolume,
+    voice.screenSharing,
+    voice.screenShareStream,
+    voice.startScreenShare,
+    voice.stopScreenShare,
+    voice.incomingScreenShares,
+    voice.showSourcePicker,
+    voice.confirmScreenShare,
+    voice.cancelSourcePicker,
+    voice.screenShareError,
+    voice.clearScreenShareError,
+    voice.voiceE2E,
+    voice.e2eWarning,
+    channels.voiceChannels,
+    channels.createVoiceChannel,
+    channels.deleteVoiceChannel,
+  ]);
+
+  const voicePresenceValue = useMemo(() => ({
+    peers: voice.peers,
+    speaking: voice.speaking,
+  }), [voice.peers, voice.speaking]);
+
+  const settingsValue = useMemo(() => ({
+    inputDevices: devices.inputDevices,
+    outputDevices: devices.outputDevices,
+    selectedInput: devices.selectedInput,
+    selectedOutput: devices.selectedOutput,
+    selectInput: devices.selectInput,
+    selectOutput: devices.selectOutput,
+    refreshDevices: devices.refreshDevices,
+    setOutputDevice: voice.setOutputDevice,
+    setUserVolume: voice.setUserVolume,
+    setMicGain: voice.setMicGain,
+    voiceProcessingMode: voice.voiceProcessingMode,
+    setVoiceProcessingMode: voice.setVoiceProcessingMode,
+    liveVoiceFallbackReason: voice.liveVoiceFallbackReason,
+  }), [
+    devices.inputDevices,
+    devices.outputDevices,
+    devices.selectedInput,
+    devices.selectedOutput,
+    devices.selectInput,
+    devices.selectOutput,
+    devices.refreshDevices,
+    voice.setOutputDevice,
+    voice.setUserVolume,
+    voice.setMicGain,
+    voice.voiceProcessingMode,
+    voice.setVoiceProcessingMode,
+    voice.liveVoiceFallbackReason,
+  ]);
+
   return (
-    <VoiceContext.Provider value={{ ...voice, ...channels, ...devices }}>
-      {children}
+    <VoiceContext.Provider value={voiceValue}>
+      <VoicePresenceContext.Provider value={voicePresenceValue}>
+        <VoiceSettingsContext.Provider value={settingsValue}>
+          {children}
+        </VoiceSettingsContext.Provider>
+      </VoicePresenceContext.Provider>
     </VoiceContext.Provider>
   );
 }
@@ -96,5 +189,17 @@ export function VoiceProvider({ children }) {
 export function useVoiceContext() {
   const ctx = useContext(VoiceContext);
   if (!ctx) throw new Error('useVoiceContext must be inside VoiceProvider');
+  return ctx;
+}
+
+export function useVoicePresenceContext() {
+  const ctx = useContext(VoicePresenceContext);
+  if (!ctx) throw new Error('useVoicePresenceContext must be inside VoiceProvider');
+  return ctx;
+}
+
+export function useVoiceSettingsContext() {
+  const ctx = useContext(VoiceSettingsContext);
+  if (!ctx) throw new Error('useVoiceSettingsContext must be inside VoiceProvider');
   return ctx;
 }

@@ -1,7 +1,7 @@
-import { useState, useEffect, useRef } from 'react';
+import { memo, useState, useEffect, useRef } from 'react';
 import { useAuth } from '../../contexts/AuthContext';
 
-export default function RoomList({ rooms, myRooms, activeId, onSelect, onRename, onDelete, unreadCounts }) {
+function RoomList({ rooms, myRooms, activeId, onSelect, onRename, onDelete, unreadCounts }) {
   const { user } = useAuth();
 
   const [contextMenu, setContextMenu] = useState(null);
@@ -247,3 +247,5 @@ export default function RoomList({ rooms, myRooms, activeId, onSelect, onRename,
     </div>
   );
 }
+
+export default memo(RoomList);

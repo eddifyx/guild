@@ -1,10 +1,11 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { api } from '../api';
 import { useSocket } from '../contexts/SocketContext';
-import { flushPendingControlMessagesNow } from '../socket';
+import { flushPendingControlMessagesNow, requestRoomSenderKey, syncRoomSenderKeys } from '../socket';
 import { useAuth } from '../contexts/AuthContext';
 import { isE2EInitialized } from '../crypto/sessionManager';
 import { hasKnownNpub, rememberUserNpub } from '../crypto/identityDirectory';
+import { addPerfPhase } from '../utils/devPerf';
 import {
   encryptDirectMessage,
   decryptDirectMessage,
@@ -19,7 +20,8 @@ const conversationMessageCache = new Map();
 const pendingSenderKeyWaits = new Map();
 const reportedDecryptFailures = new Set();
 const SENDER_KEY_WAIT_TIMEOUT_MS = 1500;
-const MESSAGE_CACHE_TTL_MS = 120000;
+const PENDING_DECRYPT_VISIBLE_TIMEOUT_MS = 3000;
+const MESSAGE_CACHE_TTL_MS = 10 * 60 * 1000;
 const ROOM_WARM_LIMIT = 20;
 const PERSISTED_MESSAGE_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const DM_UNAVAILABLE_ERROR = 'Direct messages are only available while you share a guild with this user.';
@@ -274,6 +276,31 @@ function preserveReadableMessage(existing, incoming) {
   };
 }
 
+function getMessageTimestampValue(message) {
+  const raw = message?.created_at ?? message?.createdAt ?? message?.timestamp ?? null;
+  if (typeof raw === 'number' && Number.isFinite(raw)) {
+    return raw;
+  }
+  if (typeof raw === 'string') {
+    const parsed = Date.parse(raw);
+    if (!Number.isNaN(parsed)) {
+      return parsed;
+    }
+  }
+  return Number.MAX_SAFE_INTEGER;
+}
+
+function sortMessagesChronologically(messages) {
+  return (messages || [])
+    .map((message, index) => ({ message, index }))
+    .sort((a, b) => {
+      const timeDelta = getMessageTimestampValue(a.message) - getMessageTimestampValue(b.message);
+      if (timeDelta !== 0) return timeDelta;
+      return a.index - b.index;
+    })
+    .map(({ message }) => message);
+}
+
 function mergeMessagesById(existingMessages, incomingMessages) {
   const existingById = new Map((existingMessages || []).filter(message => message?.id).map(message => [message.id, message]));
   const incomingIds = new Set();
@@ -287,12 +314,38 @@ function mergeMessagesById(existingMessages, incomingMessages) {
     merged.push(message);
   }
 
-  return merged;
+  return sortMessagesChronologically(merged);
+}
+
+function replaceMessagesFromSnapshot(existingMessages, incomingMessages) {
+  const existingById = new Map((existingMessages || []).filter(message => message?.id).map(message => [message.id, message]));
+  const incomingIds = new Set();
+  const merged = (incomingMessages || []).map(message => {
+    if (message?.id) incomingIds.add(message.id);
+    return preserveReadableMessage(message?.id ? existingById.get(message.id) : null, message);
+  });
+
+  if (merged.length === 0) {
+    return [];
+  }
+
+  const newestIncomingTimestamp = merged.reduce((latest, message) => (
+    Math.max(latest, getMessageTimestampValue(message))
+  ), Number.MIN_SAFE_INTEGER);
+
+  for (const message of existingMessages || []) {
+    if (!message?.id || incomingIds.has(message.id)) continue;
+    if (getMessageTimestampValue(message) > newestIncomingTimestamp) {
+      merged.push(message);
+    }
+  }
+
+  return sortMessagesChronologically(merged);
 }
 
 function appendOrReplaceMessage(existingMessages, incomingMessage) {
   if (!incomingMessage?.id) {
-    return [...(existingMessages || []), incomingMessage];
+    return sortMessagesChronologically([...(existingMessages || []), incomingMessage]);
   }
 
   let replaced = false;
@@ -306,7 +359,7 @@ function appendOrReplaceMessage(existingMessages, incomingMessage) {
     next.push(incomingMessage);
   }
 
-  return next;
+  return sortMessagesChronologically(next);
 }
 
 function prependOlderMessages(existingMessages, olderMessages) {
@@ -318,7 +371,7 @@ function prependOlderMessages(existingMessages, olderMessages) {
   });
 
   const remaining = (existingMessages || []).filter(message => !message?.id || !olderIds.has(message.id));
-  return [...mergedOlder, ...remaining];
+  return sortMessagesChronologically([...mergedOlder, ...remaining]);
 }
 
 function waitForSenderKeyUpdate(roomId, timeoutMs = SENDER_KEY_WAIT_TIMEOUT_MS) {
@@ -348,7 +401,8 @@ function waitForSenderKeyUpdate(roomId, timeoutMs = SENDER_KEY_WAIT_TIMEOUT_MS) 
 }
 
 async function decryptRoomMessage(msg, userId) {
-  const decrypted = await decryptGroupMessage(msg.room_id, msg.sender_id, msg.content);
+  const ciphertext = msg?._ciphertextContent || msg?.content;
+  const decrypted = await decryptGroupMessage(msg.room_id, msg.sender_id, ciphertext);
   persistDecryptedMessage(msg, decrypted.body, decrypted.attachments, userId);
   return {
     ...msg,
@@ -360,7 +414,8 @@ async function decryptRoomMessage(msg, userId) {
 }
 
 async function decryptDMMessage(msg, userId) {
-  const decrypted = await decryptDirectMessage(msg.sender_id, msg.content);
+  const ciphertext = msg?._ciphertextContent || msg?.content;
+  const decrypted = await decryptDirectMessage(msg.sender_id, ciphertext);
   persistDecryptedMessage(msg, decrypted.body, decrypted.attachments, userId);
   return {
     ...msg,
@@ -372,7 +427,8 @@ async function decryptDMMessage(msg, userId) {
 }
 
 async function tryDecryptMessage(msg, userId, retryState = null, options = {}) {
-  if (!msg.encrypted || !msg.content || !isE2EInitialized()) {
+  const ciphertext = msg?._ciphertextContent || msg?.content;
+  if (!msg.encrypted || !ciphertext || !isE2EInitialized()) {
     return msg;
   }
 
@@ -409,18 +465,34 @@ async function tryDecryptMessage(msg, userId, retryState = null, options = {}) {
 
     return await decryptDMMessage(msg, userId);
   } catch (err) {
-    const canRecoverRoomSenderKey = msg.room_id && (!retryState || retryState.canAttemptSenderKeyRecovery !== false);
+    if (msg.room_id && options.allowRoomSenderKeyRecovery === false) {
+      return {
+        ...msg,
+        content: null,
+        _decryptionPending: true,
+        _decryptionPendingSince: msg._decryptionPendingSince || Date.now(),
+        _decryptionFailed: false,
+        _decryptionError: null,
+        _ciphertextContent: msg._ciphertextContent || msg.content,
+      };
+    }
+
+    const canRecoverRoomSenderKey = msg.room_id && (
+      !retryState ||
+      !(retryState.attemptedSenderIds instanceof Set && retryState.attemptedSenderIds.has(msg.sender_id))
+    );
     if (canRecoverRoomSenderKey) {
-      if (retryState) {
-        retryState.canAttemptSenderKeyRecovery = false;
-      }
+      retryState?.attemptedSenderIds?.add(msg.sender_id);
 
       try {
+        await flushPendingControlMessagesNow();
+        await syncRoomSenderKeys(msg.room_id);
         await flushPendingControlMessagesNow();
         return await decryptRoomMessage(msg, userId);
       } catch (retryErr) {
         const senderKeyArrived = await waitForSenderKeyUpdate(msg.room_id);
-        if (senderKeyArrived) {
+        const recoveredFromStorage = senderKeyArrived ? false : (await syncRoomSenderKeys(msg.room_id)) > 0;
+        if (senderKeyArrived || recoveredFromStorage) {
           try {
             await flushPendingControlMessagesNow();
             return await decryptRoomMessage(msg, userId);
@@ -428,7 +500,23 @@ async function tryDecryptMessage(msg, userId, retryState = null, options = {}) {
             err = finalErr;
           }
         } else {
-          err = retryErr;
+          const requestedResend = await requestRoomSenderKey(msg.room_id, msg.sender_id);
+          if (requestedResend) {
+            const resentKeyArrived = await waitForSenderKeyUpdate(msg.room_id);
+            const resentRecoveredFromStorage = resentKeyArrived ? false : (await syncRoomSenderKeys(msg.room_id)) > 0;
+            if (resentKeyArrived || resentRecoveredFromStorage) {
+              try {
+                await flushPendingControlMessagesNow();
+                return await decryptRoomMessage(msg, userId);
+              } catch (finalErr) {
+                err = finalErr;
+              }
+            } else {
+              err = retryErr;
+            }
+          } else {
+            err = retryErr;
+          }
         }
       }
     }
@@ -463,7 +551,7 @@ async function decryptMessages(msgs, userId, options = {}) {
     if (msg.room_id) {
       retryState = roomRetryStates.get(msg.room_id);
       if (!retryState) {
-        retryState = { canAttemptSenderKeyRecovery: true };
+        retryState = { attemptedSenderIds: new Set() };
         roomRetryStates.set(msg.room_id, retryState);
       }
     }
@@ -474,13 +562,26 @@ async function decryptMessages(msgs, userId, options = {}) {
   return results;
 }
 
-async function fetchConversationMessages(conversation, userId, { before = null, limit = 50, quietDecrypt = false } = {}) {
+async function fetchConversationMessages(
+  conversation,
+  userId,
+  { before = null, limit = 50, quietDecrypt = false, fastRoomOpen = false } = {},
+) {
   if (!conversation) {
     return { messages: [], hasMore: false };
   }
 
+  let roomSenderKeySyncPromise = null;
   if (conversation.type === 'room') {
-    await flushPendingControlMessagesNow();
+    roomSenderKeySyncPromise = (async () => {
+      await syncRoomSenderKeys(conversation.id);
+      await flushPendingControlMessagesNow();
+    })().catch((err) => {
+      console.warn('[Rooms] Sender-key sync failed while opening room:', err?.message || err);
+    });
+    if (!fastRoomOpen) {
+      await roomSenderKeySyncPromise;
+    }
   }
 
   const beforeQuery = before ? `?before=${encodeURIComponent(before)}&limit=${limit}` : `?limit=${limit}`;
@@ -490,34 +591,45 @@ async function fetchConversationMessages(conversation, userId, { before = null, 
 
   const msgs = await api(url);
 
-  if (conversation.type === 'room') {
-    await flushPendingControlMessagesNow();
-  }
-
-  const decrypted = await decryptMessages(msgs, userId, { quiet: quietDecrypt });
-  const visibleMessages = conversation.type === 'room'
-    ? decrypted.filter(message => !message?._decryptionFailed)
-    : decrypted;
-  return { messages: visibleMessages, hasMore: msgs.length >= limit };
+  const decrypted = await decryptMessages(msgs, userId, {
+    quiet: quietDecrypt,
+    allowRoomSenderKeyRecovery: !(conversation.type === 'room' && fastRoomOpen),
+  });
+  return {
+    messages: sortMessagesChronologically(decrypted),
+    hasMore: msgs.length >= limit,
+    roomSenderKeySyncPromise,
+  };
 }
 
 export async function warmRoomMessageCache(rooms, userId) {
   if (!Array.isArray(rooms) || rooms.length === 0 || !userId || !isE2EInitialized()) return;
 
-  for (const room of rooms) {
-    const conversation = { type: 'room', id: room.id };
-    if (getCachedConversationState(conversation)) continue;
+  const roomsToWarm = rooms.filter((room) => !getCachedConversationState({ type: 'room', id: room.id }));
+  const concurrency = Math.min(4, roomsToWarm.length);
 
+  const warmNext = async (index) => {
+    const room = roomsToWarm[index];
+    if (!room) return;
+
+    const conversation = { type: 'room', id: room.id };
     try {
-      const { messages, hasMore } = await fetchConversationMessages(conversation, userId, { limit: ROOM_WARM_LIMIT, quietDecrypt: true });
+      const { messages, hasMore } = await fetchConversationMessages(conversation, userId, {
+        limit: ROOM_WARM_LIMIT,
+        quietDecrypt: true,
+      });
       cacheConversationState(conversation, messages, hasMore);
     } catch (err) {
       console.warn('[Rooms] Failed to warm room cache for', room?.name || room?.id, err?.message || err);
     }
-  }
+
+    await warmNext(index + concurrency);
+  };
+
+  await Promise.all(Array.from({ length: concurrency }, (_, index) => warmNext(index)));
 }
 
-export function useMessages(conversation) {
+export function useMessages(conversation, perfTraceId = null) {
   const { socket } = useSocket();
   const { user } = useAuth();
   const [messages, setMessages] = useState([]);
@@ -527,6 +639,7 @@ export function useMessages(conversation) {
   const prevConvRef = useRef(null);
   const pendingSentPlaintextsRef = useRef([]);
   const messagesRef = useRef([]);
+  const retryFailedVisibleRoomMessagesRef = useRef(async () => {});
 
   useEffect(() => {
     messagesRef.current = messages;
@@ -561,18 +674,50 @@ export function useMessages(conversation) {
       return;
     }
 
-    setLoading(true);
+    const shouldShowInitialLoader = messagesRef.current.length === 0;
+    if (shouldShowInitialLoader) {
+      setLoading(true);
+    }
     try {
-      const { messages: decrypted, hasMore: nextHasMore } = await fetchConversationMessages(conversation, user?.userId, { limit: 50 });
+      const useFastRoomOpen = conversation.type === 'room' && messagesRef.current.length === 0;
+      addPerfPhase(perfTraceId, 'messages:reload-start', {
+        cachedMessageCount: messagesRef.current.length,
+        fastRoomOpen: useFastRoomOpen,
+      });
+      const {
+        messages: decrypted,
+        hasMore: nextHasMore,
+        roomSenderKeySyncPromise,
+      } = await fetchConversationMessages(conversation, user?.userId, {
+        limit: 50,
+        fastRoomOpen: useFastRoomOpen,
+      });
       if (prevConvRef.current !== convKey) return;
       setError('');
       setHasMore(nextHasMore);
       setMessages(prev => {
-        const next = mergeMessagesById(prev, decrypted);
+        const next = conversation.type === 'room'
+          ? replaceMessagesFromSnapshot(prev, decrypted)
+          : mergeMessagesById(prev, decrypted);
         cacheConversationState(conversation, next, nextHasMore);
         return next;
       });
+      addPerfPhase(perfTraceId, 'messages:reload-ready', {
+        fetchedMessageCount: decrypted.length,
+        hasMore: nextHasMore,
+      });
+      if (useFastRoomOpen && roomSenderKeySyncPromise) {
+        void roomSenderKeySyncPromise.finally(() => {
+          addPerfPhase(perfTraceId, 'messages:sender-key-sync-finished');
+          if (prevConvRef.current === convKey) {
+            void retryFailedVisibleRoomMessagesRef.current();
+          }
+        });
+      }
     } catch (err) {
+      addPerfPhase(perfTraceId, 'messages:reload-error', {
+        error: err?.message || 'Failed to fetch messages',
+      });
       if (prevConvRef.current === convKey) {
         setError(err?.message || 'Failed to fetch messages.');
         console.error('Failed to fetch messages:', err);
@@ -581,13 +726,13 @@ export function useMessages(conversation) {
     if (prevConvRef.current === convKey) {
       setLoading(false);
     }
-  }, [conversation, user?.userId]);
+  }, [conversation, user?.userId, perfTraceId]);
 
   const retryFailedVisibleMessages = useCallback(async () => {
     if (!conversation || !user?.userId) return;
 
     const failedMessages = messagesRef.current.filter(message => {
-      if (!message?.encrypted || !message?._decryptionFailed) return false;
+      if (!message?.encrypted || (!message?._decryptionFailed && !message?._decryptionPending)) return false;
       if (conversation.type === 'room') {
         return message?.room_id === conversation.id;
       }
@@ -603,12 +748,22 @@ export function useMessages(conversation) {
     if (failedMessages.length === 0) return;
 
     const retriedById = new Map();
+    const roomRetryStates = new Map();
     for (const message of failedMessages) {
-      const retryState = conversation.type === 'room'
-        ? { canAttemptSenderKeyRecovery: false }
-        : null;
+      let retryState = null;
+      if (conversation.type === 'room') {
+        retryState = roomRetryStates.get(message.room_id);
+        if (!retryState) {
+          retryState = { attemptedSenderIds: new Set() };
+          roomRetryStates.set(message.room_id, retryState);
+        }
+      }
       const retried = await tryDecryptMessage(message, user.userId, retryState, { quiet: true });
-      if (retried?._decrypted) {
+      const resolvedToVisibleState = retried?._decrypted
+        || retried?._decryptionFailed
+        || (typeof retried?.content === 'string' && retried.content.length > 0);
+
+      if (resolvedToVisibleState) {
         retriedById.set(message.id, retried);
       }
     }
@@ -637,6 +792,10 @@ export function useMessages(conversation) {
   }, [conversation, retryFailedVisibleMessages]);
 
   useEffect(() => {
+    retryFailedVisibleRoomMessagesRef.current = retryFailedVisibleRoomMessages;
+  }, [retryFailedVisibleRoomMessages]);
+
+  useEffect(() => {
     if (!conversation || conversation.type !== 'room') return;
 
     const handleSenderKeyUpdated = (event) => {
@@ -647,6 +806,74 @@ export function useMessages(conversation) {
     window.addEventListener('sender-key-updated', handleSenderKeyUpdated);
     return () => window.removeEventListener('sender-key-updated', handleSenderKeyUpdated);
   }, [conversation, retryFailedVisibleRoomMessages]);
+
+  useEffect(() => {
+    if (!conversation || conversation.type !== 'room' || !user?.userId) return;
+    const hasPendingRoomMessages = messages.some((message) => (
+      message?.room_id === conversation.id
+      && message?.encrypted
+      && message?._decryptionPending
+    ));
+    if (!hasPendingRoomMessages) return;
+
+    const timeoutId = window.setTimeout(() => {
+      retryFailedVisibleRoomMessages();
+    }, 0);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [conversation, messages, user?.userId, retryFailedVisibleRoomMessages]);
+
+  useEffect(() => {
+    if (!conversation || conversation.type !== 'room') return;
+
+    const now = Date.now();
+    const pendingMessages = messages.filter((message) => (
+      message?.room_id === conversation.id
+      && message?.encrypted
+      && message?._decryptionPending
+    ));
+    if (pendingMessages.length === 0) return;
+
+    const nextExpiryMs = pendingMessages.reduce((soonest, message) => {
+      const pendingSince = message?._decryptionPendingSince || now;
+      const expiresIn = Math.max(0, PENDING_DECRYPT_VISIBLE_TIMEOUT_MS - (now - pendingSince));
+      return Math.min(soonest, expiresIn);
+    }, PENDING_DECRYPT_VISIBLE_TIMEOUT_MS);
+
+    const timeoutId = window.setTimeout(() => {
+      setMessages((prev) => {
+        let changed = false;
+        const next = prev.map((message) => {
+          if (
+            message?.room_id !== conversation.id
+            || !message?.encrypted
+            || !message?._decryptionPending
+          ) {
+            return message;
+          }
+
+          const pendingSince = message?._decryptionPendingSince || now;
+          if (Date.now() - pendingSince < PENDING_DECRYPT_VISIBLE_TIMEOUT_MS) {
+            return message;
+          }
+
+          changed = true;
+          return {
+            ...message,
+            _decryptionPending: false,
+            _decryptionFailed: true,
+            _decryptionError: 'Decryption failed',
+          };
+        });
+
+        if (!changed) return prev;
+        cacheConversationState(conversation, next, hasMore);
+        return next;
+      });
+    }, nextExpiryMs);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [conversation, messages, hasMore]);
 
   useEffect(() => {
     if (!conversation || conversation.type !== 'dm' || !user?.userId) return;

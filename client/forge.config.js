@@ -7,6 +7,54 @@ const { VitePlugin } = require('@electron-forge/plugin-vite');
 // hoists them to the monorepo root — so we copy them into the build manually.
 const NATIVE_DEPS = ['@signalapp/libsignal-client', 'better-sqlite3'];
 const RUNTIME_SOURCE_DIRS = ['electron/crypto'];
+const APPLE_VOICE_HELPER_RELATIVE_DIR = path.join('electron', 'native', 'appleVoiceProcessing');
+const APPLE_VOICE_HELPER_SOURCE_NAME = 'AppleVoiceIsolationCapture.swift';
+const APPLE_VOICE_HELPER_BINARY_NAME = 'apple-voice-isolation-capture';
+const APP_PACKAGE_NAME = 'guild';
+const MAC_APP_BUNDLE_ID = process.env.GUILD_MAC_BUNDLE_ID || 'is.1984.guild';
+const MAC_HELPER_BUNDLE_ID = `${MAC_APP_BUNDLE_ID}.helper`;
+
+function getMacSignConfig() {
+  if (process.platform !== 'darwin') return undefined;
+  if (process.env.GUILD_MAC_SIGN !== '1') return undefined;
+
+  return {
+    identity: process.env.GUILD_MAC_SIGN_IDENTITY || 'Developer ID Application',
+    hardenedRuntime: true,
+    gatekeeperAssess: false,
+    preAutoEntitlements: true,
+  };
+}
+
+function getMacNotarizeConfig() {
+  if (process.platform !== 'darwin') return undefined;
+  if (process.env.GUILD_MAC_SIGN !== '1') return undefined;
+
+  if (process.env.APPLE_KEYCHAIN_PROFILE) {
+    return {
+      keychainProfile: process.env.APPLE_KEYCHAIN_PROFILE,
+      ...(process.env.APPLE_KEYCHAIN ? { keychain: process.env.APPLE_KEYCHAIN } : {}),
+    };
+  }
+
+  if (process.env.APPLE_API_KEY && process.env.APPLE_API_KEY_ID && process.env.APPLE_API_ISSUER) {
+    return {
+      appleApiKey: process.env.APPLE_API_KEY,
+      appleApiKeyId: process.env.APPLE_API_KEY_ID,
+      appleApiIssuer: process.env.APPLE_API_ISSUER,
+    };
+  }
+
+  if (process.env.APPLE_ID && process.env.APPLE_APP_SPECIFIC_PASSWORD && process.env.APPLE_TEAM_ID) {
+    return {
+      appleId: process.env.APPLE_ID,
+      appleIdPassword: process.env.APPLE_APP_SPECIFIC_PASSWORD,
+      teamId: process.env.APPLE_TEAM_ID,
+    };
+  }
+
+  return undefined;
+}
 
 function copyDirSync(src, dest) {
   fs.mkdirSync(dest, { recursive: true });
@@ -19,6 +67,34 @@ function copyDirSync(src, dest) {
       fs.copyFileSync(srcPath, destPath);
     }
   }
+}
+
+function compileAppleVoiceHelper(sourceDir) {
+  const sourcePath = path.join(sourceDir, APPLE_VOICE_HELPER_SOURCE_NAME);
+  if (!fs.existsSync(sourcePath) || process.platform !== 'darwin') {
+    return;
+  }
+
+  const binaryDir = path.join(sourceDir, 'bin');
+  const binaryPath = path.join(binaryDir, APPLE_VOICE_HELPER_BINARY_NAME);
+  const moduleCachePath = path.join(binaryDir, '.swift-module-cache');
+  const tempDir = path.join(binaryDir, '.swift-tmp');
+  fs.mkdirSync(binaryDir, { recursive: true });
+  fs.mkdirSync(moduleCachePath, { recursive: true });
+  fs.mkdirSync(tempDir, { recursive: true });
+  execFileSync(
+    'swiftc',
+    ['-module-cache-path', moduleCachePath, '-O', sourcePath, '-o', binaryPath],
+    {
+      stdio: 'inherit',
+      env: {
+        ...process.env,
+        SWIFT_MODULECACHE_PATH: moduleCachePath,
+        TMPDIR: tempDir,
+      },
+    }
+  );
+  fs.chmodSync(binaryPath, 0o755);
 }
 
 function copyRuntimeFilesIntoBuild(buildPath) {
@@ -34,15 +110,20 @@ function copyRuntimeFilesIntoBuild(buildPath) {
     }
   }
 
+  // Runtime transitive deps:
+  // libsignal-client needs: node-gyp-build (loads .node), uuid, type-fest
+  // better-sqlite3 needs: bindings (loads .node), file-uri-to-path
   const transitiveDeps = ['node-gyp-build', 'uuid', 'type-fest', 'bindings', 'file-uri-to-path'];
   for (const dep of transitiveDeps) {
     const src = path.join(rootModules, dep);
     const dest = path.join(buildModules, dep);
-    if (fs.existsSync(src) && !fs.existsSync(dest)) {
+    if (fs.existsSync(src)) {
       copyDirSync(src, dest);
     }
   }
 
+  // Keep raw main-process crypto helpers available at runtime.
+  // Vite leaves the require() in main.js, so packaged builds need these files copied in.
   for (const relDir of RUNTIME_SOURCE_DIRS) {
     const src = path.join(__dirname, relDir);
     const dest = path.join(buildPath, relDir);
@@ -50,11 +131,17 @@ function copyRuntimeFilesIntoBuild(buildPath) {
       copyDirSync(src, dest);
     }
   }
+
+  const appleVoiceHelperBuildDir = path.join(buildPath, APPLE_VOICE_HELPER_RELATIVE_DIR);
+  if (fs.existsSync(appleVoiceHelperBuildDir)) {
+    compileAppleVoiceHelper(appleVoiceHelperBuildDir);
+  }
 }
 
 function getPackagedResourcesDir(outputPath, platform) {
   if (platform === 'darwin') {
-    return path.join(outputPath, 'Byzantine.app', 'Contents', 'Resources');
+    const appBundlePath = outputPath.endsWith('.app') ? outputPath : path.join(outputPath, `${APP_PACKAGE_NAME}.app`);
+    return path.join(appBundlePath, 'Contents', 'Resources');
   }
 
   return path.join(outputPath, 'resources');
@@ -86,9 +173,19 @@ function copyRuntimeFilesIntoPackagedApp(outputPath, platform) {
 
 module.exports = {
   packagerConfig: {
-    name: 'Byzantine',
-    executableName: 'byzantine',
+    name: APP_PACKAGE_NAME,
+    executableName: APP_PACKAGE_NAME,
+    appBundleId: MAC_APP_BUNDLE_ID,
+    helperBundleId: MAC_HELPER_BUNDLE_ID,
     icon: path.join(__dirname, 'assets', 'icon'),  // .ico/.icns auto-resolved per platform
+    appCategoryType: 'public.app-category.social-networking',
+    extendInfo: {
+      // Allow packaged macOS builds to expose Mic Modes such as Voice Isolation
+      // while /guild is actively using the microphone.
+      NSAlwaysAllowMicrophoneModeControl: true,
+    },
+    osxSign: getMacSignConfig(),
+    osxNotarize: getMacNotarizeConfig(),
     asar: {
       unpack: '**/*.node',  // Native .node files can't load from inside asar
     },
@@ -118,7 +215,14 @@ module.exports = {
     {
       name: '@electron-forge/maker-dmg',
       config: {
+        title: 'guild',
+        background: path.join(__dirname, 'assets', 'dmg-background.png'),
         icon: path.join(__dirname, 'assets', 'icon.png'),
+        format: 'ULFO',
+        contents: (opts) => ([
+          { x: 214, y: 256, type: 'file', path: opts.appPath },
+          { x: 486, y: 256, type: 'link', path: '/Applications' },
+        ]),
       },
     },
     { name: '@electron-forge/maker-zip', platforms: ['darwin', 'linux', 'win32'] },

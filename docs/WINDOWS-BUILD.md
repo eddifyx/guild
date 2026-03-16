@@ -7,7 +7,7 @@ Current status:
 
 - Windows packaging is `zip` only
 - there is no Windows installer `.exe` yet
-- the app executable lives inside the extracted app folder as `byzantine.exe`
+- the app executable lives inside the extracted app folder as `guild.exe`
 
 If you see `Cannot find module 'better-sqlite3'`, you are almost certainly
 launching an older broken zip. Build a fresh artifact with the steps below and
@@ -77,13 +77,13 @@ npm run make -- --platform=win32 --arch=x64
 If the build succeeds, the zip will be here:
 
 ```text
-client\out\make\zip\win32\x64\Byzantine-win32-x64-1.0.0.zip
+client\out\make\zip\win32\x64\guild-win32-x64-1.0.40.zip
 ```
 
 The packaged app folder will also exist here:
 
 ```text
-client\out\Byzantine-win32-x64
+client\out\guild-win32-x64
 ```
 
 ## 6. Test The Build On Windows
@@ -95,21 +95,21 @@ Instead:
 1. Copy the zip somewhere easy to find
 2. Extract it fully
 3. Open the extracted folder
-4. Run `byzantine.exe`
+4. Run `guild.exe`
 
 Example PowerShell extraction:
 
 ```powershell
 Expand-Archive `
-  -Path .\client\out\make\zip\win32\x64\Byzantine-win32-x64-1.0.0.zip `
-  -DestinationPath .\client\out\test-Byzantine-win32-x64 `
+  -Path .\client\out\make\zip\win32\x64\guild-win32-x64-1.0.40.zip `
+  -DestinationPath .\client\out\test-guild-win32-x64 `
   -Force
 ```
 
 Then launch:
 
 ```powershell
-Start-Process .\client\out\test-Byzantine-win32-x64\Byzantine-win32-x64\byzantine.exe
+Start-Process .\client\out\test-guild-win32-x64\guild-win32-x64\guild.exe
 ```
 
 ## 7. Quick Sanity Checks
@@ -135,7 +135,7 @@ Windows machine directly, use `scp`.
 From the repo root on Windows:
 
 ```powershell
-scp .\client\out\make\zip\win32\x64\Byzantine-win32-x64-1.0.0.zip `
+scp .\client\out\make\zip\win32\x64\guild-win32-x64-1.0.40.zip `
   eddifyx@82.221.100.187:/home/eddifyx/
 ```
 
@@ -148,7 +148,13 @@ ssh eddifyx@82.221.100.187
 On the VPS:
 
 ```bash
-sudo cp /home/eddifyx/Byzantine-win32-x64-1.0.0.zip /opt/guild/server/updates/Byzantine-win32-x64-1.0.0.zip
+sudo cp /home/eddifyx/guild-win32-x64-1.0.40.zip /opt/guild/server/updates/guild-win32-x64-1.0.40.zip
+```
+
+The download path on FlokiNET is:
+
+```text
+http://82.221.100.187:3001/updates/guild-win32-x64-1.0.40.zip
 ```
 
 ## 9. Troubleshooting
@@ -191,7 +197,7 @@ If you trust the artifact you just built yourself:
 
 Right now this repo produces:
 
-- a Windows `zip`
+- `guild-win32-x64-1.0.40.zip`
 
 It does **not** currently produce:
 

@@ -19,6 +19,7 @@ export default function GuildOnboardingScreen() {
   const [joining, setJoining] = useState(null);
   const [confirmGuild, setConfirmGuild] = useState(null);
   const [updateAvailable, setUpdateAvailable] = useState(false);
+  const [latestVersionInfo, setLatestVersionInfo] = useState(null);
   const [appVersion, setAppVersion] = useState('');
   const [showUpdateOverlay, setShowUpdateOverlay] = useState(false);
   const [versionToast, setVersionToast] = useState(null);
@@ -35,8 +36,9 @@ export default function GuildOnboardingScreen() {
 
   useEffect(() => {
     window.electronAPI?.getAppVersion?.().then(v => setAppVersion(v));
-    checkLatestVersion().then(({ hasUpdate }) => {
-      if (hasUpdate) setUpdateAvailable(true);
+    checkLatestVersion().then((info) => {
+      setLatestVersionInfo(info);
+      if (info?.hasUpdate) setUpdateAvailable(true);
     }).catch(() => {});
   }, []);
 
@@ -76,10 +78,21 @@ export default function GuildOnboardingScreen() {
           <button
             onClick={() => {
               if (updateAvailable) {
-                setShowUpdateOverlay(true);
+                if (latestVersionInfo) {
+                  setShowUpdateOverlay(true);
+                } else {
+                  checkLatestVersion().then((info) => {
+                    setLatestVersionInfo(info);
+                    if (info?.hasUpdate) {
+                      setUpdateAvailable(true);
+                      setShowUpdateOverlay(true);
+                    }
+                  }).catch(() => {});
+                }
               } else {
-                checkLatestVersion().then(({ hasUpdate, remoteVersion }) => {
-                  if (hasUpdate) {
+                checkLatestVersion().then((info) => {
+                  setLatestVersionInfo(info);
+                  if (info?.hasUpdate) {
                     setUpdateAvailable(true);
                     setShowUpdateOverlay(true);
                   } else {
@@ -187,6 +200,7 @@ export default function GuildOnboardingScreen() {
         <UpdateOverlay
           serverUrl={getServerUrl()}
           onDismiss={() => setShowUpdateOverlay(false)}
+          updateInfo={latestVersionInfo}
         />
       )}
 

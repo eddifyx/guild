@@ -1,12 +1,57 @@
 const express = require('express');
 const auth = require('../middleware/authMiddleware');
-const { getVisibleUsers, getUserByNpub } = require('../db');
+const {
+  getVisibleUsers,
+  getUserByNpub,
+  getUserById,
+  getUserByUsername,
+  updateUserUsername,
+  updateUserLud16,
+  updateUserProfilePicture,
+} = require('../db');
+const { broadcastPresenceUpdates } = require('../socket/presenceHandler');
 
 const router = express.Router();
 
 let getOnlineUserIds = () => new Set();
 
 router.setOnlineProvider = (fn) => { getOnlineUserIds = fn; };
+
+function normalizeDisplayName(name, fallback) {
+  if (typeof name !== 'string') return fallback;
+  const trimmed = name.trim().slice(0, 30);
+  return trimmed || fallback;
+}
+
+function parseProfilePictureUrl(url) {
+  if (url == null) return { ok: true, value: null };
+  if (typeof url !== 'string') return { ok: false, value: null };
+  const trimmed = url.trim();
+  if (!trimmed) return { ok: true, value: null };
+  if (!/^https?:\/\//i.test(trimmed)) return { ok: false, value: null };
+  return { ok: true, value: trimmed.slice(0, 2048) };
+}
+
+function resolveAvailableUsername(baseName, currentUserId) {
+  const normalized = normalizeDisplayName(baseName, '');
+  if (!normalized) return null;
+
+  const exact = getUserByUsername.get(normalized);
+  if (!exact || exact.id === currentUserId) {
+    return normalized;
+  }
+
+  for (let index = 1; index < 1000; index += 1) {
+    const suffix = `_${index}`;
+    const candidate = normalized.slice(0, Math.max(1, 30 - suffix.length)) + suffix;
+    const existing = getUserByUsername.get(candidate);
+    if (!existing || existing.id === currentUserId) {
+      return candidate;
+    }
+  }
+
+  return null;
+}
 
 router.get('/', auth, (req, res) => {
   const onlineIds = getOnlineUserIds();
@@ -56,6 +101,59 @@ router.get('/online', auth, (req, res) => {
     .filter((user) => onlineIds.has(user.id))
     .map((user) => ({ ...user, online: true }));
   res.json(users);
+});
+
+router.put('/me/nostr-profile', auth, (req, res) => {
+  const user = getUserById.get(req.userId);
+  if (!user) {
+    return res.status(404).json({ error: 'User not found' });
+  }
+
+  const requestedName = normalizeDisplayName(req.body?.displayName, user.username);
+  const nextUsername = resolveAvailableUsername(requestedName, user.id);
+  if (!nextUsername) {
+    return res.status(409).json({ error: 'Unable to reserve that display name' });
+  }
+
+  const { ok: pictureOk, value: nextPicture } = parseProfilePictureUrl(req.body?.profilePicture);
+  if (!pictureOk) {
+    return res.status(400).json({ error: 'Profile picture must be an http(s) URL' });
+  }
+
+  const rawLud16 = typeof req.body?.lud16 === 'string' ? req.body.lud16.trim() : '';
+  const nextLud16 = rawLud16 ? rawLud16.slice(0, 320) : null;
+
+  try {
+    if (nextUsername !== user.username) {
+      updateUserUsername.run(nextUsername, user.id);
+    }
+    if ((user.lud16 || null) !== nextLud16) {
+      updateUserLud16.run(nextLud16, user.id);
+    }
+    if ((user.profile_picture || null) !== nextPicture) {
+      updateUserProfilePicture.run(nextPicture, user.id);
+    }
+  } catch (err) {
+    if (err?.message?.includes('UNIQUE constraint failed')) {
+      return res.status(409).json({ error: 'Display name already in use' });
+    }
+    throw err;
+  }
+
+  const updated = getUserById.get(user.id);
+
+  if (router._io) {
+    broadcastPresenceUpdates(router._io);
+  }
+
+  res.json({
+    userId: updated.id,
+    username: updated.username,
+    avatarColor: updated.avatar_color,
+    npub: updated.npub || null,
+    lud16: updated.lud16 || null,
+    profilePicture: updated.profile_picture || null,
+  });
 });
 
 module.exports = router;

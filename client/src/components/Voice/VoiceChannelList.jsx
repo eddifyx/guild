@@ -1,15 +1,16 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
-import { useVoiceContext } from '../../contexts/VoiceContext';
+import { memo, useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { useVoiceContext, useVoicePresenceContext } from '../../contexts/VoiceContext';
 import { useAuth } from '../../contexts/AuthContext';
 import { useGuild } from '../../contexts/GuildContext';
 import { useOnlineUsers } from '../../hooks/useOnlineUsers';
 import Avatar from '../Common/Avatar';
 import Modal from '../Common/Modal';
 
-export default function VoiceChannelList({ onSelectStream, onSelectVoiceChannel }) {
+function VoiceChannelList({ onSelectStream, onSelectVoiceChannel }) {
   const { user } = useAuth();
   const { currentGuildData } = useGuild();
-  const { voiceChannels, channelId, joinChannel, deleteVoiceChannel, joinError, peers, speaking: selfSpeaking, setUserVolume } = useVoiceContext();
+  const { voiceChannels, channelId, joinChannel, deleteVoiceChannel, joinError, setUserVolume } = useVoiceContext();
+  const { peers, speaking: selfSpeaking } = useVoicePresenceContext();
   const { onlineUsers } = useOnlineUsers();
   const [volumeMenu, setVolumeMenu] = useState(null); // { x, y, userId, username }
   const [volumes, setVolumes] = useState({}); // { userId: 0-100 }
@@ -19,6 +20,9 @@ export default function VoiceChannelList({ onSelectStream, onSelectVoiceChannel 
   const [deleteConfirm, setDeleteConfirm] = useState(null);
   const [deleteError, setDeleteError] = useState('');
   const menuRef = useRef(null);
+  const onlineUsersById = useMemo(() => new Map(
+    onlineUsers.map((entry) => [entry.userId, entry])
+  ), [onlineUsers]);
 
   // Close menu on outside click
   useEffect(() => {
@@ -98,10 +102,10 @@ export default function VoiceChannelList({ onSelectStream, onSelectVoiceChannel 
                 flex: 1,
                 width: '100%',
                 padding: '7px 12px',
-                background: isActive ? 'var(--bg-active)' : 'transparent',
+                background: 'transparent',
                 border: 'none',
                 borderRadius: 6,
-                color: isActive ? 'var(--accent)' : 'var(--text-secondary)',
+                color: isActive ? 'var(--text-primary)' : 'var(--text-secondary)',
                 cursor: 'pointer',
                 textAlign: 'left',
                 display: 'flex',
@@ -112,16 +116,12 @@ export default function VoiceChannelList({ onSelectStream, onSelectVoiceChannel 
                 transition: 'all 0.15s',
               }}
               onMouseEnter={e => {
-                if (!isActive) {
-                  e.currentTarget.style.background = 'var(--bg-hover)';
-                  e.currentTarget.style.color = 'var(--text-primary)';
-                }
+                e.currentTarget.style.background = 'var(--bg-hover)';
+                e.currentTarget.style.color = 'var(--text-primary)';
               }}
               onMouseLeave={e => {
-                if (!isActive) {
-                  e.currentTarget.style.background = 'transparent';
-                  e.currentTarget.style.color = 'var(--text-secondary)';
-                }
+                e.currentTarget.style.background = 'transparent';
+                e.currentTarget.style.color = isActive ? 'var(--text-primary)' : 'var(--text-secondary)';
               }}
             >
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ opacity: 0.6, flexShrink: 0 }}>
@@ -230,7 +230,7 @@ export default function VoiceChannelList({ onSelectStream, onSelectVoiceChannel 
                         transition: 'all 0.15s ease',
                         flexShrink: 0,
                       }}>
-                        <Avatar username={p.username} color={p.avatarColor} size={14} profilePicture={onlineUsers.find(u => u.userId === p.userId)?.profilePicture} />
+                        <Avatar username={p.username} color={p.avatarColor} size={14} profilePicture={onlineUsersById.get(p.userId)?.profilePicture} />
                       </div>
                       <span
                         className="truncate"
@@ -500,3 +500,5 @@ export default function VoiceChannelList({ onSelectStream, onSelectVoiceChannel 
     </div>
   );
 }
+
+export default memo(VoiceChannelList);

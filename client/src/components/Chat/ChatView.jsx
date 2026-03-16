@@ -1,4 +1,4 @@
-import { useRef, useEffect, useCallback, useState, useMemo } from 'react';
+import { memo, useRef, useEffect, useCallback, useState, useMemo } from 'react';
 import { lookupUserByNpub } from '../../api';
 import { useMessages } from '../../hooks/useMessages';
 import { useAuth } from '../../contexts/AuthContext';
@@ -6,12 +6,13 @@ import { useGuild } from '../../contexts/GuildContext';
 import { getKnownNpub, trustUserNpub } from '../../crypto/identityDirectory.js';
 import { loadRemoteIdentityVerification } from '../../crypto/signalClient.js';
 import { isE2EInitialized } from '../../crypto/sessionManager';
+import { endPerfTraceAfterNextPaint } from '../../utils/devPerf';
 import MessageBubble from './MessageBubble';
 import MessageInput from './MessageInput';
 import TypingIndicator from './TypingIndicator';
 import VerifyIdentityModal from './VerifyIdentityModal';
 
-export default function ChatView({ conversation }) {
+function ChatView({ conversation, openTraceId = null }) {
   const { user } = useAuth();
   const { currentGuildData, loading: guildLoading } = useGuild();
   const dmSupported = useMemo(() => {
@@ -25,7 +26,7 @@ export default function ChatView({ conversation }) {
       : conversation
   ), [conversation, dmSupported]);
   const dmUnavailable = effectiveConversation?.type === 'dm' && effectiveConversation?.dmUnsupported;
-  const { messages, loading, hasMore, error: conversationError, sendMessage, loadMore, editMessage, deleteMessage } = useMessages(effectiveConversation);
+  const { messages, loading, hasMore, error: conversationError, sendMessage, loadMore, editMessage, deleteMessage } = useMessages(effectiveConversation, openTraceId);
   const bottomRef = useRef(null);
   const scrollRef = useRef(null);
   const wasAtBottomRef = useRef(true);
@@ -40,6 +41,7 @@ export default function ChatView({ conversation }) {
   const [trustInput, setTrustInput] = useState('');
   const [trustError, setTrustError] = useState('');
   const [trustSaving, setTrustSaving] = useState(false);
+  const completedOpenTraceIdsRef = useRef(new Set());
 
   useEffect(() => {
     setKeyChanged(false);
@@ -126,6 +128,20 @@ export default function ChatView({ conversation }) {
     });
     return () => cancelAnimationFrame(frameId);
   }, [conversation, messages, scrollToBottom]);
+
+  useEffect(() => {
+    if (!openTraceId || loading) return;
+    if (completedOpenTraceIdsRef.current.has(openTraceId)) return;
+
+    completedOpenTraceIdsRef.current.add(openTraceId);
+    endPerfTraceAfterNextPaint(openTraceId, {
+      status: 'ready',
+      surface: 'chat-view',
+      conversationType: effectiveConversation?.type || null,
+      messageCount: messages.length,
+      hasError: Boolean(conversationError || dmUnavailable),
+    });
+  }, [openTraceId, loading, effectiveConversation?.type, messages.length, conversationError, dmUnavailable]);
 
   const handleScroll = useCallback(() => {
     const el = scrollRef.current;
@@ -420,3 +436,4 @@ export default function ChatView({ conversation }) {
   );
 }
 
+export default memo(ChatView);

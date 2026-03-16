@@ -11,6 +11,7 @@ const {
 } = require('../db');
 
 const msManager = require('../voice/mediasoupManager');
+const runtimeMetrics = require('../monitoring/runtimeMetrics');
 
 // In-memory voice state: Map<channelId, Map<userId, { muted, deafened, speaking, screenSharing }>>
 const voiceState = new Map();
@@ -103,6 +104,7 @@ async function leaveVoiceChannel(io, socket, channelId, userId) {
   }
 
   emitChannelUpdate(io, channelId);
+  runtimeMetrics.recordVoiceLeave({ channelId, userId });
 }
 
 function handleVoice(io, socket) {
@@ -153,8 +155,10 @@ function handleVoice(io, socket) {
         existingProducers,
         participants: buildChannelUpdate(channelId).participants,
       });
+      runtimeMetrics.recordVoiceJoin({ channelId, userId });
     } catch (err) {
       console.error('voice:join error:', err);
+      runtimeMetrics.recordVoiceError('voice:join', { userId, message: err.message });
       callback({ ok: false, error: 'Failed to join voice channel' });
     }
   });
@@ -218,9 +222,11 @@ function handleVoice(io, socket) {
       });
 
       socket.to(`voice:${channelId}`).emit('voice:new-producer', payload);
+      runtimeMetrics.recordVoiceProduce({ channelId, userId, kind, source: producerMeta.source });
       callback({ ok: true, producerId: producerMeta.producerId, source: producerMeta.source });
     } catch (err) {
       console.error('voice:produce error:', err);
+      runtimeMetrics.recordVoiceError('voice:produce', { userId, channelId, message: err.message });
       callback({ ok: false, error: 'Produce failed' });
     }
   });
@@ -230,9 +236,11 @@ function handleVoice(io, socket) {
     try {
       if (!verifyVoiceSession(channelId, callback)) return;
       const consumerData = await msManager.consume(channelId, userId, producerUserId, producerId, rtpCapabilities);
+      runtimeMetrics.recordVoiceConsume({ channelId, userId, producerUserId, producerId });
       callback({ ok: true, ...consumerData });
     } catch (err) {
       console.error('voice:consume error:', err);
+      runtimeMetrics.recordVoiceError('voice:consume', { userId, channelId, message: err.message });
       callback({ ok: false, error: 'Consume failed' });
     }
   });
@@ -309,6 +317,7 @@ function handleVoice(io, socket) {
       if (callback) callback({ ok: true });
     } catch (err) {
       console.error('voice:leave error:', err);
+      runtimeMetrics.recordVoiceError('voice:leave', { userId, channelId, message: err.message });
       if (callback) callback({ ok: false, error: 'Leave failed' });
     }
   });
@@ -317,6 +326,11 @@ function handleVoice(io, socket) {
     const existing = getUserVoiceSession.get(userId);
     if (!existing) return;
     leaveVoiceChannel(io, socket, existing.channel_id, userId).catch((err) => {
+      runtimeMetrics.recordVoiceError('voice:disconnect_cleanup', {
+        userId,
+        channelId: existing.channel_id,
+        message: err.message,
+      });
       console.error(`voice:disconnect cleanup error for user ${userId}:`, err);
     });
   });

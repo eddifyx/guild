@@ -100,6 +100,43 @@ button, input, textarea, select {
   font-family: inherit;
 }
 
+button,
+[role="button"],
+img,
+svg,
+canvas,
+video {
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-user-drag: none;
+}
+
+button,
+[role="button"],
+img,
+svg,
+canvas,
+video,
+a {
+  -webkit-tap-highlight-color: transparent;
+}
+
+button:focus,
+button:focus-visible,
+[role="button"]:focus,
+[role="button"]:focus-visible,
+img:focus,
+img:focus-visible,
+svg:focus,
+svg:focus-visible,
+canvas:focus,
+canvas:focus-visible,
+video:focus,
+video:focus-visible {
+  outline: none;
+  box-shadow: none;
+}
+
 input, textarea, select {
   outline: none;
   user-select: text;

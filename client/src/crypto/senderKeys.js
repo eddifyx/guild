@@ -46,8 +46,8 @@ const _distributedRooms = new Set();
 export async function encryptWithSenderKey(roomId, textContent, attachmentMeta) {
   // Ensure SKDM is distributed for this room
   if (!_distributedRooms.has(roomId)) {
-    const { skdm } = await createSKDM(roomId);
-    await _distributeSKDM(roomId, skdm);
+    const { skdm, distributionId } = await createSKDM(roomId);
+    await _distributeSKDM(roomId, skdm, distributionId);
     _distributedRooms.add(roomId);
   }
 
@@ -92,7 +92,7 @@ export async function decryptWithSenderKey(roomId, senderUserId, envelopeJson) {
 // SKDM Distribution (encrypted via DM to each room member)
 // ---------------------------------------------------------------------------
 
-async function _distributeSKDM(roomId, skdmBase64) {
+async function _distributeSKDM(roomId, skdmBase64, distributionId) {
   const myUserId = getCurrentUserId();
 
   try {
@@ -119,7 +119,12 @@ async function _distributeSKDM(roomId, skdmBase64) {
         const envelope = await encryptDirectMessage(member.id, payload);
         const socket = getSocket();
         if (socket) {
-          socket.emit('dm:sender_key', { toUserId: member.id, envelope });
+          socket.emit('dm:sender_key', {
+            toUserId: member.id,
+            envelope,
+            roomId,
+            distributionId,
+          });
         }
       } catch (err) {
         console.error(`[SK] Failed to distribute SKDM to ${member.id}:`, err);
@@ -183,7 +188,8 @@ export async function processDecryptedSenderKey(fromUserId, payload) {
     err.retryable = !(
       err.message?.includes('not a member') ||
       err.message?.includes('could not verify') ||
-      err.message?.includes('Unknown sender key distribution format')
+      err.message?.includes('Unknown sender key distribution format') ||
+      err.message?.includes('rollback rejected')
     );
     throw err;
   }
@@ -194,10 +200,15 @@ export async function processDecryptedSenderKey(fromUserId, payload) {
 // ---------------------------------------------------------------------------
 
 export async function rekeyRoom(roomId) {
-  const { skdm } = await signalRekeyRoom(roomId);
+  const { skdm, distributionId } = await signalRekeyRoom(roomId);
   _distributedRooms.delete(roomId);
-  await _distributeSKDM(roomId, skdm);
+  await _distributeSKDM(roomId, skdm, distributionId);
   _distributedRooms.add(roomId);
+}
+
+export async function redistributeSenderKey(roomId) {
+  const { skdm, distributionId } = await createSKDM(roomId);
+  await _distributeSKDM(roomId, skdm, distributionId);
 }
 
 // ---------------------------------------------------------------------------

@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useMemo } from 'react';
 import { api } from '../api';
 import { rememberUsers } from '../crypto/identityDirectory.js';
 
@@ -138,7 +138,7 @@ export function useGuilds() {
     });
   }, []);
 
-  return {
+  return useMemo(() => ({
     publicGuilds,
     loading,
     fetchPublicGuilds,
@@ -162,5 +162,29 @@ export function useGuilds() {
     getMotd,
     updateMotd,
     updateMemberPermissions,
-  };
+  }), [
+    publicGuilds,
+    loading,
+    fetchPublicGuilds,
+    createGuild,
+    joinGuild,
+    joinByInviteCode,
+    leaveGuild,
+    updateGuild,
+    disbandGuild,
+    transferLeadership,
+    getInviteCode,
+    regenerateInvite,
+    fetchMembers,
+    changeMemberRank,
+    kickMember,
+    updateNote,
+    fetchRanks,
+    createRank,
+    updateRank,
+    deleteRank,
+    getMotd,
+    updateMotd,
+    updateMemberPermissions,
+  ]);
 }

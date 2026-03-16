@@ -399,12 +399,26 @@ function registerSignalHandlers(ipcMain) {
   ipcMain.handle('signal:group-decrypt', async (_event, senderId, roomId, payloadB64) => {
     if (!store) throw new Error('Signal store not initialized');
 
-    const { ProtocolAddress, groupDecrypt } = await getSignalModule();
-    const senderAddress = ProtocolAddress.new(senderId, DEVICE_ID);
-    const payload = Buffer.from(payloadB64, 'base64');
+    try {
+      const { ProtocolAddress, groupDecrypt } = await getSignalModule();
+      const senderAddress = ProtocolAddress.new(senderId, DEVICE_ID);
+      const payload = Buffer.from(payloadB64, 'base64');
 
-    const plaintext = await groupDecrypt(senderAddress, store.senderKey, payload);
-    return Buffer.from(plaintext).toString('utf8');
+      const plaintext = await groupDecrypt(senderAddress, store.senderKey, payload);
+      return {
+        ok: true,
+        plaintext: Buffer.from(plaintext).toString('utf8'),
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        error: {
+          message: err?.message || String(err || 'Group decrypt failed'),
+          code: err?.code ?? null,
+          operation: err?.operation ?? null,
+        },
+      };
+    }
   });
 
   // ---- Re-key room (forward secrecy on member leave) ----

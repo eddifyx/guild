@@ -1,11 +1,19 @@
 import { useEffect, useRef, useState } from 'react';
 import introSound from '../../assets/intro-sound.wav';
+import logoGeometry from '../../branding/logoGeometry.json';
 
 // Final diamond sizes (130px container)
-const SIZE = 130;
-const MIDDLE_INSET = 23;  // → 84×84
-const INNER_INSET = 43;   // → 44×44
+const SIZE = logoGeometry.baseSize;
+const OUTER_STROKE = logoGeometry.outerStroke;
+const MIDDLE_STROKE = logoGeometry.middleStroke;
+const MIDDLE_INSET = logoGeometry.middleInset; // -> 88x88
+const INNER_INSET = logoGeometry.innerInset;   // -> 52x52
 const TARGET = 45;
+const BASE_TILT = logoGeometry.tilt;
+const OUTER_PEAK = 152;
+const MIDDLE_PEAK = -28;
+const INNER_GAP = INNER_INSET - MIDDLE_INSET;
+const INNER_TUCK_SCALE = clamp(1 - Math.max(0, 22 - INNER_GAP) * 0.01, 0.84, 0.97);
 
 // Scale: start matching LoginScreen's 80px logo, grow to 130px
 const INITIAL_SCALE = 80 / SIZE; // ≈ 0.615
@@ -14,11 +22,6 @@ const INITIAL_SCALE = 80 / SIZE; // ≈ 0.615
 const HOLD_MS = 80;       // Brief anchor — logo appears at login size
 const EXPAND_MS = 500;    // Scale up + diamonds drift apart
 const CONVERGE_MS = 1300; // Both diamonds converge together
-const MIDDLE_CONVERGE_MS = 1300; // Same timing — simultaneous snap
-
-// Peak drift angles (how far diamonds wander before returning)
-const OUTER_PEAK = 155;   // ~110° from target
-const MIDDLE_PEAK = -35;  // ~80° from target (opposite direction)
 
 // Snap-lock easing: smooth approach, then hard mechanical snap at 96%
 function easeSnapLock(t) {
@@ -31,8 +34,13 @@ function easeOutCubic(t) {
   return 1 - Math.pow(1 - t, 3);
 }
 
+function clamp(value, min, max) {
+  return Math.min(max, Math.max(min, value));
+}
+
 export default function HashLock({ onComplete }) {
   const logoRef = useRef(null);
+  const rigRef = useRef(null);
   const outerRef = useRef(null);
   const middleRef = useRef(null);
   const innerRef = useRef(null);
@@ -75,6 +83,11 @@ export default function HashLock({ onComplete }) {
       let scale = INITIAL_SCALE;
       let outerAngle = TARGET;
       let middleAngle = TARGET;
+      let rigTiltX = BASE_TILT;
+      let rigTiltY = BASE_TILT * -1.15;
+      let rigRoll = 0;
+      let rigFloatY = 0;
+      let innerScale = 1;
 
       if (elapsed < HOLD_MS) {
         // Phase 0: Hold — logo at login-screen size, all aligned
@@ -89,18 +102,28 @@ export default function HashLock({ onComplete }) {
         scale = INITIAL_SCALE + (1 - INITIAL_SCALE) * eased;
         outerAngle = TARGET + (OUTER_PEAK - TARGET) * eased;
         middleAngle = TARGET + (MIDDLE_PEAK - TARGET) * eased;
+        rigTiltX = BASE_TILT + eased * 2;
+        rigTiltY = BASE_TILT * -1.15 - eased * 1.4;
+        rigRoll = eased * -1.4;
+        rigFloatY = eased * -8;
+        innerScale = 1 + (INNER_TUCK_SCALE - 1) * eased;
       } else {
         // Phase 2: Converge — diamonds ease back to 45°
         scale = 1;
         const convergeElapsed = elapsed - HOLD_MS - EXPAND_MS;
-        const outerT = Math.min(1, convergeElapsed / CONVERGE_MS);
-        const middleT = Math.min(1, convergeElapsed / MIDDLE_CONVERGE_MS);
+        const convergeT = Math.min(1, convergeElapsed / CONVERGE_MS);
+        const eased = easeSnapLock(convergeT);
 
-        outerAngle = OUTER_PEAK + (TARGET - OUTER_PEAK) * easeSnapLock(outerT);
-        middleAngle = MIDDLE_PEAK + (TARGET - MIDDLE_PEAK) * easeSnapLock(middleT);
+        outerAngle = OUTER_PEAK + (TARGET - OUTER_PEAK) * eased;
+        middleAngle = MIDDLE_PEAK + (TARGET - MIDDLE_PEAK) * eased;
+        rigTiltX = BASE_TILT + (1 - eased) * 2;
+        rigTiltY = BASE_TILT * -1.15 - (1 - eased) * 1.4;
+        rigRoll = (1 - eased) * -1.4;
+        rigFloatY = (1 - eased) * -8;
+        innerScale = INNER_TUCK_SCALE + (1 - INNER_TUCK_SCALE) * eased;
 
         // Detect lock moment — both arrive
-        if (outerT >= 1 && middleT >= 1 && lockTime < 0) {
+        if (convergeT >= 1 && lockTime < 0) {
           lockTime = now;
         }
       }
@@ -108,6 +131,9 @@ export default function HashLock({ onComplete }) {
       // Apply scale to logo container
       if (logoRef.current) {
         logoRef.current.style.transform = `scale(${scale})`;
+      }
+      if (rigRef.current) {
+        rigRef.current.style.transform = `translateY(${rigFloatY}px) rotateX(${rigTiltX}deg) rotateY(${rigTiltY}deg) rotateZ(${rigRoll}deg)`;
       }
 
       // Apply rotation to diamonds
@@ -120,8 +146,8 @@ export default function HashLock({ onComplete }) {
 
       // Inner: gentle breathing until lock
       if (innerRef.current) {
-        const breathe = lockTime < 0 ? Math.sin(elapsed / 500) * 0.02 : 0;
-        innerRef.current.style.transform = `rotate(${TARGET}deg) scale(${1 + breathe})`;
+        const breathe = lockTime < 0 ? Math.sin(elapsed / 500) * 0.01 : 0;
+        innerRef.current.style.transform = `rotate(${TARGET}deg) scale(${innerScale * (1 + breathe)})`;
       }
 
       // Post-lock effects
@@ -208,47 +234,59 @@ export default function HashLock({ onComplete }) {
           width: SIZE,
           height: SIZE,
           zIndex: 1,
+          perspective: '1200px',
           transform: `scale(${INITIAL_SCALE})`,
           willChange: 'transform',
         }}
       >
-        {/* Outer diamond */}
         <div
-          ref={outerRef}
+          ref={rigRef}
           style={{
             position: 'absolute',
             inset: 0,
-            border: '1.5px solid rgba(64, 255, 64, 0.4)',
-            borderRadius: 5,
-            transform: `rotate(${TARGET}deg)`,
+            transform: `rotateX(${BASE_TILT}deg) rotateY(${BASE_TILT * -1.15}deg)`,
+            transformStyle: 'preserve-3d',
             willChange: 'transform',
           }}
-        />
-        {/* Middle diamond */}
-        <div
-          ref={middleRef}
-          style={{
-            position: 'absolute',
-            inset: MIDDLE_INSET,
-            border: '1.5px solid rgba(64, 255, 64, 0.5)',
-            borderRadius: 4,
-            transform: `rotate(${TARGET}deg)`,
-            willChange: 'transform',
-          }}
-        />
-        {/* Inner diamond */}
-        <div
-          ref={innerRef}
-          style={{
-            position: 'absolute',
-            inset: INNER_INSET,
-            background: 'rgba(64, 255, 64, 0.25)',
-            borderRadius: 3,
-            boxShadow: '0 0 20px rgba(64, 255, 64, 0.2)',
-            transform: `rotate(${TARGET}deg)`,
-            willChange: 'transform',
-          }}
-        />
+        >
+          {/* Outer diamond */}
+          <div
+            ref={outerRef}
+            style={{
+              position: 'absolute',
+              inset: 0,
+              border: `${OUTER_STROKE}px solid rgba(64, 255, 64, 0.4)`,
+              borderRadius: 5,
+              transform: `rotate(${TARGET}deg)`,
+              willChange: 'transform, border-color',
+            }}
+          />
+          {/* Middle diamond */}
+          <div
+            ref={middleRef}
+            style={{
+              position: 'absolute',
+              inset: MIDDLE_INSET,
+              border: `${MIDDLE_STROKE}px solid rgba(64, 255, 64, 0.5)`,
+              borderRadius: 4,
+              transform: `rotate(${TARGET}deg)`,
+              willChange: 'transform, border-color',
+            }}
+          />
+          {/* Inner diamond */}
+          <div
+            ref={innerRef}
+            style={{
+              position: 'absolute',
+              inset: INNER_INSET,
+              background: 'rgba(64, 255, 64, 0.25)',
+              borderRadius: 3,
+              boxShadow: '0 0 20px rgba(64, 255, 64, 0.2)',
+              transform: `rotate(${TARGET}deg)`,
+              willChange: 'transform, box-shadow, background',
+            }}
+          />
+        </div>
       </div>
 
     </div>

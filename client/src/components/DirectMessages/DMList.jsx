@@ -1,8 +1,8 @@
-import { useState, useEffect, useRef } from 'react';
+import { memo, useState, useEffect, useRef } from 'react';
 import Avatar from '../Common/Avatar';
 import OnlineBadge from '../Common/OnlineBadge';
 
-export default function DMList({ conversations, activeId, onSelect, onRemove, onlineIds, unreadCounts }) {
+function DMList({ conversations, activeId, onSelect, onRemove, onlineIds, unreadCounts }) {
   const [contextMenu, setContextMenu] = useState(null);
   const menuRef = useRef(null);
 
@@ -182,3 +182,5 @@ export default function DMList({ conversations, activeId, onSelect, onRemove, on
     </div>
   );
 }
+
+export default memo(DMList);

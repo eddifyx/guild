@@ -2,13 +2,31 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('electronAPI', {
   getPlatform: () => process.platform,
+  getPlatformTarget: () => (process.platform === 'darwin'
+    ? `darwin-${process.arch}`
+    : `${process.platform}-${process.arch}`),
   showNotification: (title, body) =>
     ipcRenderer.invoke('show-notification', { title, body }),
   getAppVersion: () =>
     ipcRenderer.invoke('get-app-version'),
+  isAppleVoiceCaptureSupported: () => ipcRenderer.invoke('apple-voice-capture-supported'),
+  primeAppleVoiceCapture: () => ipcRenderer.invoke('apple-voice-capture-prime'),
+  startAppleVoiceCapture: (ownerId) => ipcRenderer.invoke('apple-voice-capture-start', ownerId),
+  stopAppleVoiceCapture: (ownerId) => ipcRenderer.invoke('apple-voice-capture-stop', ownerId),
+  onAppleVoiceCaptureFrame: (callback) => {
+    const handler = (_event, chunk) => callback(chunk);
+    ipcRenderer.on('apple-voice-capture-frame', handler);
+    return () => ipcRenderer.removeListener('apple-voice-capture-frame', handler);
+  },
+  onAppleVoiceCaptureState: (callback) => {
+    const handler = (_event, payload) => callback(payload);
+    ipcRenderer.on('apple-voice-capture-state', handler);
+    return () => ipcRenderer.removeListener('apple-voice-capture-state', handler);
+  },
   windowMinimize: () => ipcRenderer.invoke('window-minimize'),
   windowMaximize: () => ipcRenderer.invoke('window-maximize'),
   windowClose: () => ipcRenderer.invoke('window-close'),
+  restartApp: () => ipcRenderer.invoke('app-relaunch'),
   downloadUpdate: (serverUrl) => ipcRenderer.invoke('download-update', serverUrl),
   applyUpdate: (info) => ipcRenderer.invoke('apply-update', info),
   onUpdateProgress: (callback) => {
@@ -21,10 +39,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getDesktopWindows: () => ipcRenderer.invoke('get-desktop-windows'),
   getDesktopThumbnails: () => ipcRenderer.invoke('get-desktop-thumbnails'),
   selectDesktopSource: (sourceId) => ipcRenderer.invoke('select-desktop-source', sourceId),
+  getScreenCaptureAccessStatus: () => ipcRenderer.invoke('get-screen-capture-access-status'),
+  openScreenCaptureSettings: () => ipcRenderer.invoke('open-screen-capture-settings'),
   openExternal: (url) => ipcRenderer.invoke('open-external', url),
   messageCacheGet: (userId, messageId) => ipcRenderer.invoke('message-cache:get', userId, messageId),
   messageCacheSet: (userId, messageId, entry) => ipcRenderer.invoke('message-cache:set', userId, messageId, entry),
   messageCacheDelete: (userId, messageId) => ipcRenderer.invoke('message-cache:delete', userId, messageId),
+  logPerfSample: (sample) => ipcRenderer.send('perf:sample', sample),
+  getPerfSamples: () => ipcRenderer.invoke('perf:get-samples'),
 });
 
 // Expose Electron safeStorage API for encrypted key persistence.

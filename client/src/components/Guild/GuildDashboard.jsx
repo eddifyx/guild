@@ -3,26 +3,32 @@ import { useGuild } from '../../contexts/GuildContext';
 import { useGuilds } from '../../hooks/useGuilds';
 import { useAuth } from '../../contexts/AuthContext';
 import { useSocket } from '../../contexts/SocketContext';
-import { useVoiceContext } from '../../contexts/VoiceContext';
+import { useVoiceContext, useVoicePresenceContext } from '../../contexts/VoiceContext';
 import { useOnlineUsers } from '../../hooks/useOnlineUsers';
 import { getFileUrl } from '../../api';
 import Avatar from '../Common/Avatar';
 import UserProfileCard from '../Common/UserProfileCard';
 
 const MEMBER_LIMIT = 50;
+const STATUS_MAX_LENGTH = 128;
+const MEMBER_TABLE_COLUMNS = '40px minmax(0, 1.15fr) 110px minmax(0, 1.4fr) 110px 60px';
 
-function MemberRow({ member, formatLastSeen, onClickMember }) {
+function MemberRow({ member, formatLastSeen, onClickMember, onOpenStatus, canOpenProfile }) {
   const isOnline = member.isOnline;
+  const fullStatus = member.customStatus?.trim() || '';
+  const hasStatus = Boolean(fullStatus);
   return (
     <div
       style={{
         ...styles.memberRow,
         opacity: isOnline ? 1 : 0.45,
-        cursor: 'pointer',
+        cursor: canOpenProfile ? 'pointer' : 'default',
       }}
-      onClick={(e) => onClickMember?.(member, e)}
+      onClick={(e) => {
+        if (canOpenProfile) onClickMember?.(member, e);
+      }}
       onMouseEnter={e => {
-        e.currentTarget.style.background = 'rgba(64, 255, 64, 0.03)';
+        if (canOpenProfile) e.currentTarget.style.background = 'rgba(64, 255, 64, 0.03)';
       }}
       onMouseLeave={e => {
         e.currentTarget.style.background = 'transparent';
@@ -40,13 +46,42 @@ function MemberRow({ member, formatLastSeen, onClickMember }) {
       {/* Rank */}
       <span style={styles.rankBadge}>{member.rankName || 'Member'}</span>
 
-      {/* Status (custom or last seen) */}
-      <span style={styles.memberStatusCell}>
-        {isOnline && member.customStatus
-          ? member.customStatus
-          : isOnline
-            ? 'Online'
-            : formatLastSeen(member.lastSeen)}
+      {/* Status */}
+      <div style={styles.memberStatusCell}>
+        {hasStatus ? (
+          <button
+            type="button"
+            style={styles.memberStatusButton}
+            title={`View full status for ${member.username}`}
+            aria-label={`View full status for ${member.username}`}
+            onMouseDown={(e) => { e.preventDefault(); }}
+            onMouseEnter={(e) => { e.currentTarget.style.color = 'var(--text-primary)'; }}
+            onMouseLeave={(e) => { e.currentTarget.style.color = 'var(--text-secondary)'; }}
+            onClick={(e) => {
+              e.stopPropagation();
+              onOpenStatus?.(member, e);
+            }}
+          >
+            <span style={styles.memberStatusText}>{fullStatus}</span>
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={styles.memberStatusIcon}>
+              <path d="M15 3h6v6" />
+              <path d="M10 14 21 3" />
+              <path d="M21 14v7H3V3h7" />
+            </svg>
+          </button>
+        ) : (
+          <span style={styles.memberStatusPlaceholder}>-</span>
+        )}
+      </div>
+
+      {/* Last seen */}
+      <span
+        style={{
+          ...styles.memberLastSeenCell,
+          color: isOnline ? 'var(--accent)' : 'var(--text-secondary)',
+        }}
+      >
+        {isOnline ? 'Online now' : formatLastSeen(member.lastSeen)}
       </span>
 
       {/* Primal link */}
@@ -63,6 +98,66 @@ function MemberRow({ member, formatLastSeen, onClickMember }) {
           </span>
         )}
       </span>
+    </div>
+  );
+}
+
+function StatusPopover({ username, status, position, onClose }) {
+  const popoverRef = useRef(null);
+  const [popoverStyle, setPopoverStyle] = useState({});
+
+  useEffect(() => {
+    if (!popoverRef.current || !position) return;
+    const rect = popoverRef.current.getBoundingClientRect();
+    const pad = 12;
+    let left = position.x;
+    let top = position.y + 8;
+
+    if (left + rect.width + pad > window.innerWidth) {
+      left = window.innerWidth - rect.width - pad;
+    }
+    if (top + rect.height + pad > window.innerHeight) {
+      top = position.top - rect.height - 8;
+    }
+    if (top < pad) top = pad;
+    if (left < pad) left = pad;
+
+    setPopoverStyle({ left, top });
+  }, [position]);
+
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if (e.key === 'Escape') onClose();
+    };
+    const handlePointerDown = (e) => {
+      if (popoverRef.current && !popoverRef.current.contains(e.target)) onClose();
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    const timer = setTimeout(() => window.addEventListener('mousedown', handlePointerDown), 0);
+
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('mousedown', handlePointerDown);
+      clearTimeout(timer);
+    };
+  }, [onClose]);
+
+  return (
+    <div ref={popoverRef} style={{ ...styles.statusPopover, ...popoverStyle }}>
+      <div style={styles.statusPopoverHeader}>
+        <div style={styles.statusPopoverUser}>{username}</div>
+        <button
+          type="button"
+          style={styles.statusPopoverClose}
+          onMouseDown={(e) => { e.preventDefault(); }}
+          onClick={onClose}
+        >
+          Close
+        </button>
+      </div>
+      <div style={styles.statusPopoverText}>{status}</div>
+      <div style={styles.statusPopoverHint}>Press Esc or click outside to close.</div>
     </div>
   );
 }
@@ -174,7 +269,8 @@ export default function GuildDashboard({ onSelectDM }) {
   const { socket } = useSocket();
   const { currentGuild, currentGuildData } = useGuild();
   const { getMotd, fetchMembers } = useGuilds();
-  const { voiceChannels, peers, channelId, speaking: selfSpeaking } = useVoiceContext();
+  const { voiceChannels, channelId } = useVoiceContext();
+  const { peers, speaking: selfSpeaking } = useVoicePresenceContext();
   const { onlineUsers, onlineIds } = useOnlineUsers();
 
   const [motd, setMotd] = useState('');
@@ -185,6 +281,7 @@ export default function GuildDashboard({ onSelectDM }) {
   const [showAllMembers, setShowAllMembers] = useState(false);
   const [showAbout, setShowAbout] = useState(false);
   const [profileCard, setProfileCard] = useState(null);
+  const [statusPopover, setStatusPopover] = useState(null);
   const statusInputRef = useRef(null);
 
   useEffect(() => {
@@ -203,7 +300,7 @@ export default function GuildDashboard({ onSelectDM }) {
   }, [editingStatus]);
 
   const handleStatusSubmit = () => {
-    const text = statusDraft.trim().slice(0, 128);
+    const text = statusDraft.trim().slice(0, STATUS_MAX_LENGTH);
     if (socket) socket.emit('status:update', { status: text });
     setMyStatus(text);
     setEditingStatus(false);
@@ -250,12 +347,11 @@ export default function GuildDashboard({ onSelectDM }) {
   const guildName = currentGuildData?.name || 'Guild';
   const guildImage = currentGuildData?.image_url;
   const [guildImgFailed, setGuildImgFailed] = useState(false);
-  const prevGuildImage = useRef(guildImage);
-  if (prevGuildImage.current !== guildImage) {
-    prevGuildImage.current = guildImage;
-    setGuildImgFailed(false);
-  }
   const guildDescription = currentGuildData?.description;
+
+  useEffect(() => {
+    setGuildImgFailed(false);
+  }, [guildImage]);
 
   return (
     <div style={styles.container}>
@@ -312,7 +408,7 @@ export default function GuildDashboard({ onSelectDM }) {
                 onKeyDown={handleStatusKeyDown}
                 onBlur={handleStatusSubmit}
                 placeholder="What are you up to?"
-                maxLength={128}
+                maxLength={STATUS_MAX_LENGTH}
                 style={styles.statusInput}
               />
             ) : (
@@ -357,6 +453,7 @@ export default function GuildDashboard({ onSelectDM }) {
               <span style={styles.colName}>Name</span>
               <span style={styles.colRank}>Rank</span>
               <span style={styles.colStatus}>Status</span>
+              <span style={styles.colLastSeen}>Last Seen</span>
               <span style={styles.colLink}>Profile</span>
             </div>
             {visibleMembers.map(m => (
@@ -364,8 +461,24 @@ export default function GuildDashboard({ onSelectDM }) {
                 key={m.id}
                 member={m}
                 formatLastSeen={formatLastSeen}
+                onOpenStatus={(member, e) => {
+                  if (!member.customStatus?.trim()) return;
+                  const rect = e.currentTarget.getBoundingClientRect();
+                  setProfileCard(null);
+                  setStatusPopover({
+                    username: member.id === user?.userId ? 'You' : member.username,
+                    status: member.customStatus.trim(),
+                    position: {
+                      x: rect.left,
+                      y: rect.bottom,
+                      top: rect.top,
+                    },
+                  });
+                }}
+                canOpenProfile={m.id !== user?.userId}
                 onClickMember={(member, e) => {
                   if (member.id === user?.userId) return;
+                  setStatusPopover(null);
                   setProfileCard({ user: member, position: { x: e.clientX, y: e.clientY } });
                 }}
               />
@@ -400,6 +513,15 @@ export default function GuildDashboard({ onSelectDM }) {
           onSendMessage={(u) => {
             if (onSelectDM) onSelectDM({ other_user_id: u.userId, other_username: u.username, other_npub: u.npub || null });
           }}
+        />
+      )}
+
+      {statusPopover && (
+        <StatusPopover
+          username={statusPopover.username}
+          status={statusPopover.status}
+          position={statusPopover.position}
+          onClose={() => setStatusPopover(null)}
         />
       )}
 
@@ -677,11 +799,12 @@ const styles = {
     backdropFilter: 'blur(8px)',
     border: '1px solid var(--border)',
     borderRadius: 12,
-    overflow: 'hidden',
+    overflowX: 'auto',
+    overflowY: 'hidden',
   },
   memberListHeader: {
     display: 'grid',
-    gridTemplateColumns: '40px 1fr 100px 1fr 60px',
+    gridTemplateColumns: MEMBER_TABLE_COLUMNS,
     gap: 12,
     alignItems: 'center',
     padding: '8px 16px',
@@ -694,7 +817,7 @@ const styles = {
   },
   memberRow: {
     display: 'grid',
-    gridTemplateColumns: '40px 1fr 100px 1fr 60px',
+    gridTemplateColumns: MEMBER_TABLE_COLUMNS,
     gap: 12,
     alignItems: 'center',
     padding: '8px 16px',
@@ -719,6 +842,7 @@ const styles = {
     border: '2px solid #0e120e',
   },
   memberName: {
+    minWidth: 0,
     fontSize: 13,
     fontWeight: 600,
     color: 'var(--text-primary)',
@@ -739,10 +863,43 @@ const styles = {
     width: 'fit-content',
   },
   memberStatusCell: {
-    fontSize: 12,
+    minWidth: 0,
+  },
+  memberStatusButton: {
+    minWidth: 0,
+    width: '100%',
+    display: 'flex',
+    alignItems: 'center',
+    gap: 8,
+    padding: 0,
+    border: 'none',
+    background: 'none',
     color: 'var(--text-secondary)',
+    cursor: 'pointer',
+    fontSize: 12,
+    fontFamily: "'Geist', sans-serif",
+    textAlign: 'left',
+    transition: 'color 0.15s ease',
+  },
+  memberStatusText: {
+    minWidth: 0,
+    flex: 1,
+    fontSize: 'inherit',
+    color: 'inherit',
     overflow: 'hidden',
     textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
+  },
+  memberStatusIcon: {
+    flexShrink: 0,
+    opacity: 0.7,
+  },
+  memberStatusPlaceholder: {
+    fontSize: 12,
+    color: 'var(--text-muted)',
+  },
+  memberLastSeenCell: {
+    fontSize: 12,
     whiteSpace: 'nowrap',
   },
   memberLinkCell: {
@@ -755,10 +912,65 @@ const styles = {
     cursor: 'pointer',
   },
   colAvatar: { width: 40 },
-  colName: {},
+  colName: { minWidth: 0 },
   colRank: {},
-  colStatus: {},
+  colStatus: { minWidth: 0 },
+  colLastSeen: {},
   colLink: { textAlign: 'right' },
+
+  statusPopover: {
+    position: 'fixed',
+    zIndex: 1250,
+    width: 'min(360px, calc(100vw - 24px))',
+    maxHeight: 'min(240px, calc(100vh - 24px))',
+    overflowY: 'auto',
+    background: 'rgba(11, 16, 11, 0.98)',
+    border: '1px solid rgba(64, 255, 64, 0.12)',
+    borderRadius: 12,
+    boxShadow: '0 14px 40px rgba(0, 0, 0, 0.45)',
+    padding: 14,
+    animation: 'fadeIn 0.12s ease-out',
+  },
+  statusPopoverHeader: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+    marginBottom: 10,
+  },
+  statusPopoverUser: {
+    fontSize: 11,
+    fontWeight: 600,
+    color: 'var(--accent)',
+    textTransform: 'uppercase',
+    letterSpacing: 0.8,
+  },
+  statusPopoverClose: {
+    border: '1px solid var(--border)',
+    borderRadius: 999,
+    background: 'rgba(255, 255, 255, 0.03)',
+    color: 'var(--text-secondary)',
+    cursor: 'pointer',
+    padding: '4px 10px',
+    fontSize: 11,
+    fontFamily: "'Geist', sans-serif",
+  },
+  statusPopoverText: {
+    fontSize: 14,
+    color: 'var(--text-primary)',
+    lineHeight: 1.65,
+    whiteSpace: 'pre-wrap',
+    wordBreak: 'break-word',
+    padding: '12px 14px',
+    background: 'rgba(10, 15, 10, 0.55)',
+    border: '1px solid var(--border)',
+    borderRadius: 10,
+  },
+  statusPopoverHint: {
+    marginTop: 10,
+    fontSize: 11,
+    color: 'var(--text-muted)',
+  },
 
   // Show more button
   showMoreBtn: {

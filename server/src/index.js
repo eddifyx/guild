@@ -34,8 +34,19 @@ const assetRoutes = require('./routes/assets');
 const addonRoutes = require('./routes/addons');
 const keyRoutes = require('./routes/keys');
 const guildRoutes = require('./routes/guilds');
+const devDashboardRoutes = require('./routes/devDashboard');
+const runtimeMetrics = require('./monitoring/runtimeMetrics');
 
 const PORT = process.env.PORT || 3001;
+const clientVersionPath = path.join(__dirname, '..', 'client-version.json');
+
+function readClientVersion() {
+  try {
+    return JSON.parse(fs.readFileSync(clientVersionPath, 'utf8'));
+  } catch {
+    return { version: '0.0.0' };
+  }
+}
 
 // Ensure uploads directory exists
 const uploadsDir = path.join(__dirname, '..', 'uploads');
@@ -47,6 +58,34 @@ mime.define({ 'image/avif': ['avif'] });
 
 const app = express();
 const server = http.createServer(app);
+
+app.use((req, res, next) => {
+  const requestUrl = req.originalUrl || req.url || '';
+  if (requestUrl.startsWith('/api/dev/')) {
+    next();
+    return;
+  }
+
+  const startedAt = process.hrtime.bigint();
+  runtimeMetrics.beginHttpRequest();
+
+  let finished = false;
+  const finalize = () => {
+    if (finished) return;
+    finished = true;
+    const durationMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
+    runtimeMetrics.endHttpRequest({
+      method: req.method,
+      url: requestUrl,
+      statusCode: res.statusCode,
+      durationMs,
+    });
+  };
+
+  res.on('finish', finalize);
+  res.on('close', finalize);
+  next();
+});
 
 // CORS: allow Electron (file:// sends null origin), localhost dev, and env-configured origins
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '').split(',').filter(Boolean);
@@ -186,21 +225,182 @@ app.use('/deepfilter', express.static(path.join(__dirname, 'public/deepfilter'))
 // Serve update ZIPs
 const updatesDir = path.join(__dirname, '..', 'updates');
 if (!fs.existsSync(updatesDir)) fs.mkdirSync(updatesDir, { recursive: true });
-// Updates require authentication to prevent unauthorized downloads
-app.use('/updates', (req, res, next) => {
-  const token = req.query.token ||
-    (req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.slice(7) : null);
-  if (!token) return res.status(401).json({ error: 'Authentication required' });
-  const session = getSession.get(hashToken(token));
-  if (!session) return res.status(401).json({ error: 'Invalid or expired session' });
-  next();
-}, express.static(updatesDir));
+// Release downloads are public so existing installs can update without needing
+// to pass session credentials through the native updater path.
+app.use('/updates', express.static(updatesDir));
 
-// Client version check
-const clientVersion = require('../client-version.json');
+function buildAbsoluteUrl(req, relativePath) {
+  const protocol = req.get('x-forwarded-proto') || req.protocol || 'http';
+  return `${protocol}://${req.get('host')}${relativePath}`;
+}
+
+function buildUpdateDownloads(req, version) {
+  return {
+    'darwin-arm64': {
+      label: 'Mac Apple Silicon',
+      installerUrl: buildAbsoluteUrl(req, `/updates/guild-${version}-arm64.dmg`),
+      archiveUrl: buildAbsoluteUrl(req, `/updates/guild-darwin-arm64-${version}.zip`),
+    },
+    'win32-x64': {
+      label: 'Windows 10 x64',
+      installerUrl: buildAbsoluteUrl(req, `/updates/guild-win32-x64-${version}.zip`),
+      archiveUrl: buildAbsoluteUrl(req, `/updates/guild-win32-x64-${version}.zip`),
+    },
+  };
+}
+
 app.get('/api/version', (req, res) => {
-  res.json(clientVersion);
+  res.setHeader('Cache-Control', 'no-store');
+  const versionInfo = readClientVersion();
+  const version = versionInfo?.version || '0.0.0';
+  res.json({
+    ...versionInfo,
+    updateStrategy: 'manual-install',
+    manualInstallReason: 'Direct download is required for this release.',
+    downloadPageUrl: buildAbsoluteUrl(req, '/download'),
+    downloads: buildUpdateDownloads(req, version),
+  });
 });
+
+app.get('/download', (req, res) => {
+  const versionInfo = readClientVersion();
+  const version = versionInfo?.version || '0.0.0';
+  const downloads = buildUpdateDownloads(req, version);
+
+  res.setHeader('Cache-Control', 'no-store');
+  res.type('html').send(`<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>/guild Downloads</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #070a07;
+        --panel: rgba(10, 18, 10, 0.92);
+        --panel-border: rgba(24, 88, 33, 0.55);
+        --text: #e7efe7;
+        --muted: #8ea392;
+        --accent: #ff7a00;
+        --success: #3cff68;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 32px;
+        background:
+          radial-gradient(circle at top, rgba(24, 88, 33, 0.22), transparent 45%),
+          linear-gradient(180deg, #081008 0%, var(--bg) 100%);
+        color: var(--text);
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+      .card {
+        width: min(720px, 100%);
+        padding: 32px;
+        border-radius: 24px;
+        border: 1px solid var(--panel-border);
+        background: var(--panel);
+        box-shadow: 0 24px 64px rgba(0, 0, 0, 0.36);
+      }
+      h1 {
+        margin: 0 0 8px;
+        font-size: 38px;
+        line-height: 1.05;
+      }
+      p {
+        margin: 0 0 18px;
+        color: var(--muted);
+        line-height: 1.5;
+      }
+      .version {
+        color: var(--success);
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        font-size: 12px;
+        margin-bottom: 14px;
+      }
+      .grid {
+        display: grid;
+        gap: 16px;
+        margin-top: 26px;
+      }
+      .download {
+        padding: 18px 20px;
+        border-radius: 18px;
+        border: 1px solid rgba(24, 88, 33, 0.65);
+        background: rgba(8, 14, 8, 0.92);
+      }
+      .download h2 {
+        margin: 0 0 6px;
+        font-size: 20px;
+      }
+      .download p {
+        margin-bottom: 14px;
+      }
+      .actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+      }
+      .button {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 44px;
+        padding: 0 18px;
+        border-radius: 12px;
+        border: 1px solid rgba(255, 122, 0, 0.28);
+        background: rgba(255, 122, 0, 0.12);
+        color: var(--accent);
+        text-decoration: none;
+        font-weight: 700;
+      }
+      .button.secondary {
+        border-color: rgba(60, 255, 104, 0.24);
+        background: rgba(60, 255, 104, 0.08);
+        color: var(--success);
+      }
+      .footnote {
+        margin-top: 22px;
+        font-size: 13px;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="card">
+      <div class="version">Version ${version}</div>
+      <h1>/guild downloads</h1>
+      <p>If the in-app updater stalls on extracting files, install the latest build directly from here once. After that, future updates will use the newer updater path.</p>
+      <section class="grid">
+        <article class="download">
+          <h2>${downloads['darwin-arm64'].label}</h2>
+          <p>Recommended for Apple Silicon Macs.</p>
+          <div class="actions">
+            <a class="button" href="${downloads['darwin-arm64'].installerUrl}">Download DMG</a>
+            <a class="button secondary" href="${downloads['darwin-arm64'].archiveUrl}">Download ZIP</a>
+          </div>
+        </article>
+        <article class="download">
+          <h2>${downloads['win32-x64'].label}</h2>
+          <p>Direct install package for Windows.</p>
+          <div class="actions">
+            <a class="button" href="${downloads['win32-x64'].installerUrl}">Download ZIP</a>
+          </div>
+        </article>
+      </section>
+      <p class="footnote">Install the new build over the existing app. Your account and server settings stay with the app profile on disk.</p>
+    </main>
+  </body>
+</html>`);
+});
+
+app.use('/api/dev', devDashboardRoutes);
 
 // Routes
 app.use('/api/auth', authRoutes);
@@ -219,6 +419,7 @@ app.use('/api/guilds', guildRoutes);
 
 // Provide online user info to REST routes
 userRoutes.setOnlineProvider(getOnlineUserIds);
+userRoutes._io = io;
 roomRoutes.setIO(io);
 voiceRoutes._io = io;
 assetRoutes._io = io;

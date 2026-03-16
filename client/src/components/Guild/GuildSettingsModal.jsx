@@ -1,8 +1,9 @@
-import { useState, useEffect, useCallback } from 'react';
+import { memo, useState, useEffect, useCallback, useMemo, useRef, useTransition } from 'react';
 import { useGuild } from '../../contexts/GuildContext';
 import { useGuilds } from '../../hooks/useGuilds';
 import { useAuth } from '../../contexts/AuthContext';
 import { uploadFile, getFileUrl } from '../../api';
+import { endPerfTraceAfterNextPaint, startPerfTrace } from '../../utils/devPerf';
 
 
 const PERMISSION_LABELS = {
@@ -39,7 +40,7 @@ const PERMISSION_GROUPS = {
   Administration: ['modify_rank_names', 'set_permissions', 'manage_rooms', 'manage_theme', 'disband_guild', 'transfer_leadership'],
 };
 
-export default function GuildSettingsModal({ onClose }) {
+function GuildSettingsModal({ onClose, openTraceId = null }) {
   const { user } = useAuth();
   const { currentGuild, currentGuildData, fetchGuildDetails, clearGuild } = useGuild();
   const {
@@ -50,61 +51,173 @@ export default function GuildSettingsModal({ onClose }) {
   } = useGuilds();
 
   const [tab, setTab] = useState('Overview');
-  const [members, setMembers] = useState([]);
+  const [members, setMembers] = useState(() => currentGuildData?.members || []);
+  const [membersLoaded, setMembersLoaded] = useState(() => Array.isArray(currentGuildData?.members));
   const [ranks, setRanks] = useState([]);
+  const [ranksLoaded, setRanksLoaded] = useState(false);
   const [inviteCode, setInviteCode] = useState('');
+  const [inviteLoaded, setInviteLoaded] = useState(false);
   const [motd, setMotd] = useState('');
+  const [motdLoaded, setMotdLoaded] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
   const [confirmDialog, setConfirmDialog] = useState(null);
+  const [isTabPending, startTabTransition] = useTransition();
 
   // Overview form state
-  const [guildName, setGuildName] = useState('');
-  const [guildDesc, setGuildDesc] = useState('');
-  const [guildPublic, setGuildPublic] = useState(true);
-  const [guildImage, setGuildImage] = useState('');
+  const [guildName, setGuildName] = useState(() => currentGuildData?.name || '');
+  const [guildDesc, setGuildDesc] = useState(() => currentGuildData?.description || '');
+  const [guildPublic, setGuildPublic] = useState(() => currentGuildData?.is_public !== 0);
+  const [guildImage, setGuildImage] = useState(() => currentGuildData?.image_url || '');
   const [uploadingImage, setUploadingImage] = useState(false);
   const [imagePreview, setImagePreview] = useState(null);
+  const loadingRef = useRef({ members: false, ranks: false, invite: false, motd: false });
+  const completedOpenTraceIdsRef = useRef(new Set());
 
   // My rank info
-  const myMember = members.find(m => m.id === user?.userId);
+  const myMember = useMemo(
+    () => members.find((m) => m.id === user?.userId),
+    [members, user?.userId]
+  );
   const myRankOrder = myMember?.rankOrder ?? 999;
   const isGuildMaster = myRankOrder === 0;
 
-  // Load members + ranks on mount for permission checks
+  const loadMembers = useCallback(async ({ force = false } = {}) => {
+    if (!currentGuild) return [];
+    if (!force && (membersLoaded || loadingRef.current.members)) return [];
+    loadingRef.current.members = true;
+    try {
+      const nextMembers = await fetchMembers(currentGuild);
+      setMembers(nextMembers);
+      setMembersLoaded(true);
+      return nextMembers;
+    } finally {
+      loadingRef.current.members = false;
+    }
+  }, [currentGuild, fetchMembers, membersLoaded]);
+
+  const loadRanks = useCallback(async ({ force = false } = {}) => {
+    if (!currentGuild) return [];
+    if (!force && (ranksLoaded || loadingRef.current.ranks)) return [];
+    loadingRef.current.ranks = true;
+    try {
+      const nextRanks = await fetchRanks(currentGuild);
+      setRanks(nextRanks);
+      setRanksLoaded(true);
+      return nextRanks;
+    } finally {
+      loadingRef.current.ranks = false;
+    }
+  }, [currentGuild, fetchRanks, ranksLoaded]);
+
+  const loadMotd = useCallback(async ({ force = false } = {}) => {
+    if (!currentGuild) return '';
+    if (!force && (motdLoaded || loadingRef.current.motd)) return '';
+    loadingRef.current.motd = true;
+    try {
+      const nextMotd = await getMotd(currentGuild);
+      setMotd(nextMotd || '');
+      setMotdLoaded(true);
+      return nextMotd || '';
+    } finally {
+      loadingRef.current.motd = false;
+    }
+  }, [currentGuild, getMotd, motdLoaded]);
+
+  const loadInviteCode = useCallback(async ({ force = false } = {}) => {
+    if (!currentGuild) return '';
+    if (!force && (inviteLoaded || loadingRef.current.invite)) return '';
+    loadingRef.current.invite = true;
+    try {
+      const nextInviteCode = await getInviteCode(currentGuild);
+      setInviteCode(nextInviteCode || '');
+      setInviteLoaded(true);
+      return nextInviteCode || '';
+    } finally {
+      loadingRef.current.invite = false;
+    }
+  }, [currentGuild, getInviteCode, inviteLoaded]);
+
   useEffect(() => {
-    if (!currentGuild) return;
-    fetchMembers(currentGuild).then(setMembers).catch(console.error);
-    fetchRanks(currentGuild).then(setRanks).catch(console.error);
+    setRanks([]);
+    setRanksLoaded(false);
+    setInviteCode('');
+    setInviteLoaded(false);
+    setMotd('');
+    setMotdLoaded(false);
+    loadingRef.current = { members: false, ranks: false, invite: false, motd: false };
+
+    if (currentGuildData?.id !== currentGuild || !Array.isArray(currentGuildData?.members)) {
+      setMembers([]);
+      setMembersLoaded(false);
+    }
   }, [currentGuild]);
 
-  // Load data when switching tabs
+  useEffect(() => {
+    setGuildName(currentGuildData?.name || '');
+    setGuildDesc(currentGuildData?.description || '');
+    setGuildPublic(currentGuildData?.is_public !== 0);
+    setGuildImage(currentGuildData?.image_url || '');
+    setImagePreview(null);
+
+    if (currentGuildData?.id === currentGuild && Array.isArray(currentGuildData?.members)) {
+      setMembers(currentGuildData.members);
+      setMembersLoaded(true);
+    }
+  }, [currentGuildData, currentGuild]);
+
   useEffect(() => {
     if (!currentGuild) return;
-    if (tab === 'Overview') {
-      if (currentGuildData) {
-        setGuildName(currentGuildData.name || '');
-        setGuildDesc(currentGuildData.description || '');
-        setGuildPublic(currentGuildData.is_public !== 0);
-        setGuildImage(currentGuildData.image_url || '');
-        setImagePreview(null);
-      }
-      getMotd(currentGuild).then(setMotd).catch(() => {});
-    }
-    if (tab === 'Members' || tab === 'Ranks' || tab === 'Admin') {
-      fetchMembers(currentGuild).then(setMembers).catch(console.error);
-      fetchRanks(currentGuild).then(setRanks).catch(console.error);
-    }
-    if (tab === 'Invite') {
-      getInviteCode(currentGuild).then(setInviteCode).catch(() => {});
-    }
-  }, [tab, currentGuild, currentGuildData]);
+    if (!membersLoaded) loadMembers().catch(console.error);
+    if (!motdLoaded) loadMotd().catch(() => {});
 
-  const flash = (msg, isError) => {
+    const rankWarmTimer = window.setTimeout(() => {
+      if (!ranksLoaded) loadRanks().catch(console.error);
+    }, 120);
+
+    return () => window.clearTimeout(rankWarmTimer);
+  }, [currentGuild, membersLoaded, motdLoaded, ranksLoaded, loadMembers, loadMotd, loadRanks]);
+
+  useEffect(() => {
+    if (!currentGuild) return;
+    if ((tab === 'Members' || tab === 'Admin') && !membersLoaded) {
+      loadMembers().catch(console.error);
+    }
+    if (tab === 'Ranks' && !ranksLoaded) {
+      loadRanks().catch(console.error);
+    }
+    if (tab === 'Invite' && !inviteLoaded) {
+      loadInviteCode().catch(() => {});
+    }
+    if (tab === 'Overview' && !motdLoaded) {
+      loadMotd().catch(() => {});
+    }
+  }, [tab, currentGuild, membersLoaded, ranksLoaded, inviteLoaded, motdLoaded, loadMembers, loadRanks, loadInviteCode, loadMotd]);
+
+  const flash = useCallback((msg, isError) => {
     if (isError) { setError(msg); setSuccess(''); }
     else { setSuccess(msg); setError(''); }
     setTimeout(() => { setError(''); setSuccess(''); }, 3000);
-  };
+  }, []);
+
+  const handleSelectTab = useCallback((nextTab) => {
+    if (nextTab === tab) {
+      return;
+    }
+    const traceId = startPerfTrace('guild-settings-tab-switch', {
+      fromTab: tab,
+      toTab: nextTab,
+      surface: 'guild-settings',
+    });
+    startTabTransition(() => {
+      setTab(nextTab);
+    });
+    endPerfTraceAfterNextPaint(traceId, {
+      status: 'ready',
+      surface: 'guild-settings',
+      tab: nextTab,
+    });
+  }, [tab]);
 
   // --- Overview handlers ---
   const handleSaveOverview = async () => {
@@ -121,6 +234,7 @@ export default function GuildSettingsModal({ onClose }) {
   const handleSaveMotd = async () => {
     try {
       await updateMotd(currentGuild, motd);
+      setMotdLoaded(true);
       flash('MotD updated', false);
     } catch (err) { flash(err.message, true); }
   };
@@ -148,7 +262,7 @@ export default function GuildSettingsModal({ onClose }) {
   const handleChangeRank = async (userId, rankId) => {
     try {
       await changeMemberRank(currentGuild, userId, rankId);
-      setMembers(await fetchMembers(currentGuild));
+      await loadMembers({ force: true });
       flash('Rank updated', false);
     } catch (err) { flash(err.message, true); }
   };
@@ -177,7 +291,7 @@ export default function GuildSettingsModal({ onClose }) {
     if (!newRankName.trim()) return;
     try {
       await createRank(currentGuild, { name: newRankName.trim(), permissions: {} });
-      setRanks(await fetchRanks(currentGuild));
+      await loadRanks({ force: true });
       setNewRankName('');
       flash('Rank created', false);
     } catch (err) { flash(err.message, true); }
@@ -186,7 +300,7 @@ export default function GuildSettingsModal({ onClose }) {
   const handleUpdateRank = async (rankId, updates) => {
     try {
       await updateRank(currentGuild, rankId, updates);
-      setRanks(await fetchRanks(currentGuild));
+      await loadRanks({ force: true });
       flash('Rank updated', false);
     } catch (err) { flash(err.message, true); }
   };
@@ -200,8 +314,10 @@ export default function GuildSettingsModal({ onClose }) {
       onConfirm: async () => {
         try {
           await deleteRank(currentGuild, rankId);
-          setRanks(await fetchRanks(currentGuild));
-          setMembers(await fetchMembers(currentGuild));
+          await Promise.all([
+            loadRanks({ force: true }),
+            loadMembers({ force: true }),
+          ]);
           flash('Rank deleted', false);
         } catch (err) { flash(err.message, true); }
       },
@@ -213,6 +329,7 @@ export default function GuildSettingsModal({ onClose }) {
     try {
       const code = await regenerateInvite(currentGuild);
       setInviteCode(code);
+      setInviteLoaded(true);
       flash('Invite code regenerated', false);
     } catch (err) { flash(err.message, true); }
   };
@@ -232,7 +349,7 @@ export default function GuildSettingsModal({ onClose }) {
         try {
           await transferLeadership(currentGuild, transferTarget);
           await fetchGuildDetails(currentGuild);
-          setMembers(await fetchMembers(currentGuild));
+          await loadMembers({ force: true });
           flash('Leadership transferred', false);
         } catch (err) { flash(err.message, true); }
       },
@@ -286,10 +403,28 @@ export default function GuildSettingsModal({ onClose }) {
     return () => window.removeEventListener('keydown', handler);
   }, [onClose]);
 
-  const permissionsReady = members.length > 0;
-  const parsePerms = (raw) => { try { return JSON.parse(raw || '{}'); } catch { return {}; } };
-  const myPerms = myMember ? parsePerms(myMember.permissions) : {};
-  const myOverrides = myMember ? parsePerms(myMember.permissionOverrides) : {};
+  useEffect(() => {
+    if (!openTraceId || completedOpenTraceIdsRef.current.has(openTraceId)) {
+      return;
+    }
+
+    completedOpenTraceIdsRef.current.add(openTraceId);
+    endPerfTraceAfterNextPaint(openTraceId, {
+      status: 'ready',
+      surface: 'guild-settings',
+    });
+  }, [openTraceId]);
+
+  const permissionsReady = membersLoaded;
+  const parsePerms = useCallback((raw) => { try { return JSON.parse(raw || '{}'); } catch { return {}; } }, []);
+  const myPerms = useMemo(
+    () => (myMember ? parsePerms(myMember.permissions) : {}),
+    [myMember, parsePerms]
+  );
+  const myOverrides = useMemo(
+    () => (myMember ? parsePerms(myMember.permissionOverrides) : {}),
+    [myMember, parsePerms]
+  );
   // Per-member overrides take precedence over rank defaults
   const hasPerm = (key) => {
     if (isGuildMaster) return true;
@@ -307,10 +442,13 @@ export default function GuildSettingsModal({ onClose }) {
   const showMemberControls = canRemoveMember || canPromoteDemote;
 
   // Only show tabs relevant to the user's permissions
-  const visibleTabs = ['Overview', 'Members'];
-  if (canSetPerms) visibleTabs.push('Ranks');
-  if (canInvite) visibleTabs.push('Invite');
-  if (isGuildMaster) visibleTabs.push('Admin');
+  const visibleTabs = useMemo(() => {
+    const nextTabs = ['Overview', 'Members'];
+    if (canSetPerms) nextTabs.push('Ranks');
+    if (canInvite) nextTabs.push('Invite');
+    if (isGuildMaster) nextTabs.push('Admin');
+    return nextTabs;
+  }, [canInvite, canSetPerms, isGuildMaster]);
 
   return (
     <div onClick={onClose} style={styles.overlay}>
@@ -335,7 +473,7 @@ export default function GuildSettingsModal({ onClose }) {
           {visibleTabs.map(t => (
             <button
               key={t}
-              onClick={() => setTab(t)}
+              onClick={() => handleSelectTab(t)}
               style={{ ...styles.tab, ...(tab === t ? styles.tabActive : {}) }}
             >
               {t}
@@ -344,7 +482,7 @@ export default function GuildSettingsModal({ onClose }) {
         </div>
 
         {/* Tab content */}
-        <div style={styles.content}>
+        <div style={{ ...styles.content, opacity: isTabPending ? 0.8 : 1 }}>
           {tab === 'Overview' && (
             <OverviewTab
               guildName={guildName} setGuildName={setGuildName}
@@ -369,7 +507,7 @@ export default function GuildSettingsModal({ onClose }) {
               isGuildMaster={isGuildMaster}
               guildId={currentGuild}
               onUpdatePermissions={updateMemberPermissions}
-              onRefreshMembers={() => fetchMembers(currentGuild).then(setMembers)}
+              onRefreshMembers={() => loadMembers({ force: true })}
               flash={flash}
             />
           )}
@@ -436,7 +574,7 @@ export default function GuildSettingsModal({ onClose }) {
 }
 
 // ─── Overview Tab ────────────────────────────────────────
-function OverviewTab({ guildName, setGuildName, guildDesc, setGuildDesc, guildPublic, setGuildPublic, guildImage, imagePreview, onImageSelect, onRemoveImage, uploadingImage, motd, setMotd, onSaveOverview, onSaveMotd, canManageTheme, canModifyMotd, readOnly }) {
+const OverviewTab = memo(function OverviewTab({ guildName, setGuildName, guildDesc, setGuildDesc, guildPublic, setGuildPublic, guildImage, imagePreview, onImageSelect, onRemoveImage, uploadingImage, motd, setMotd, onSaveOverview, onSaveMotd, canManageTheme, canModifyMotd, readOnly }) {
   const imgSrc = imagePreview || (guildImage ? getFileUrl(guildImage) : null);
 
   if (readOnly) {
@@ -540,13 +678,30 @@ function OverviewTab({ guildName, setGuildName, guildDesc, setGuildDesc, guildPu
       <button onClick={onSaveMotd} style={styles.secondaryBtn}>Update MotD</button>
     </div>
   );
-}
+});
 
 // ─── Members Tab ─────────────────────────────────────────
-function MembersTab({ members, ranks, myRankOrder, onChangeRank, onKick, userId, showControls, isGuildMaster, guildId, onUpdatePermissions, onRefreshMembers, flash }) {
+const MembersTab = memo(function MembersTab({ members, ranks, myRankOrder, onChangeRank, onKick, userId, showControls, isGuildMaster, guildId, onUpdatePermissions, onRefreshMembers, flash }) {
   const [expandedMember, setExpandedMember] = useState(null);
   const [overrideEdits, setOverrideEdits] = useState({});
   const [saving, setSaving] = useState(false);
+  const rankOptionsByCurrentRankId = useMemo(() => {
+    const assignableRanks = ranks.filter((rank) => rank.rank_order > myRankOrder);
+    const next = new Map();
+
+    for (const rank of ranks) {
+      if (rank.rank_order > myRankOrder) {
+        next.set(rank.id, assignableRanks);
+      } else {
+        next.set(
+          rank.id,
+          [...assignableRanks, rank].sort((a, b) => a.rank_order - b.rank_order)
+        );
+      }
+    }
+
+    return next;
+  }, [ranks, myRankOrder]);
 
   const startEditOverrides = (m) => {
     if (expandedMember === m.id) { setExpandedMember(null); return; }
@@ -583,6 +738,7 @@ function MembersTab({ members, ranks, myRankOrder, onChangeRank, onKick, userId,
       </div>
       {members.map(m => {
         const canModify = showControls && myRankOrder < m.rankOrder && m.id !== userId;
+        const rankOptions = rankOptionsByCurrentRankId.get(m.rankId) || ranks;
         const hasOverrides = m.permissionOverrides && m.permissionOverrides !== '{}' && m.permissionOverrides !== '';
         const isExpanded = expandedMember === m.id;
         const rankPerms = (() => { try { return JSON.parse(m.permissions || '{}'); } catch { return {}; } })();
@@ -647,7 +803,7 @@ function MembersTab({ members, ranks, myRankOrder, onChangeRank, onKick, userId,
                     onChange={e => onChangeRank(m.id, e.target.value)}
                     style={styles.select}
                   >
-                    {ranks.filter(r => r.rank_order > myRankOrder || r.id === m.rankId).map(r => (
+                    {rankOptions.map(r => (
                       <option key={r.id} value={r.id}>{r.name}</option>
                     ))}
                   </select>
@@ -721,10 +877,10 @@ function MembersTab({ members, ranks, myRankOrder, onChangeRank, onKick, userId,
       })}
     </div>
   );
-}
+});
 
 // ─── Ranks Tab ───────────────────────────────────────────
-function RanksTab({ ranks, myRankOrder, editingRank, setEditingRank, newRankName, setNewRankName, onCreateRank, onUpdateRank, onDeleteRank, canSetPerms }) {
+const RanksTab = memo(function RanksTab({ ranks, myRankOrder, editingRank, setEditingRank, newRankName, setNewRankName, onCreateRank, onUpdateRank, onDeleteRank, canSetPerms }) {
   const [editName, setEditName] = useState('');
   const [editPerms, setEditPerms] = useState({});
 
@@ -805,10 +961,10 @@ function RanksTab({ ranks, myRankOrder, editingRank, setEditingRank, newRankName
       )}
     </div>
   );
-}
+});
 
 // ─── Invite Tab ──────────────────────────────────────────
-function InviteTab({ inviteCode, onRegenerate, canInvite }) {
+const InviteTab = memo(function InviteTab({ inviteCode, onRegenerate, canInvite }) {
   const [copied, setCopied] = useState(false);
 
   const handleCopy = () => {
@@ -839,10 +995,10 @@ function InviteTab({ inviteCode, onRegenerate, canInvite }) {
       )}
     </div>
   );
-}
+});
 
 // ─── Admin Tab (Guild Master only) ───────────────────────
-function AdminTab({ members, transferTarget, setTransferTarget, onTransfer, onDisband, userId }) {
+const AdminTab = memo(function AdminTab({ members, transferTarget, setTransferTarget, onTransfer, onDisband, userId }) {
   const otherMembers = members.filter(m => m.id !== userId);
 
   return (
@@ -878,7 +1034,7 @@ function AdminTab({ members, transferTarget, setTransferTarget, onTransfer, onDi
       </div>
     </div>
   );
-}
+});
 
 // ─── Styles ──────────────────────────────────────────────
 const styles = {
@@ -1213,3 +1369,5 @@ const styles = {
     fontFamily: "'Geist', sans-serif",
   },
 };
+
+export default memo(GuildSettingsModal);

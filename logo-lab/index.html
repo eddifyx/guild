@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>/guild Logo Lab</title>
+    <link rel="stylesheet" href="/logo-lab/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="hero">
+        <div class="hero-copy">
+          <p class="eyebrow">Isolated Logo Lab</p>
+          <h1>/guild mark studies</h1>
+          <p class="lede">
+            This stays outside the Electron build. It compares a few line-weight
+            directions, then lets us push the preferred one through motion with
+            a subtle 3D pass.
+          </p>
+        </div>
+        <aside class="hero-note">
+          <strong>Current build untouched</strong>
+          <span>Static preview only</span>
+        </aside>
+      </header>
+
+      <main class="layout">
+        <section class="panel controls-panel">
+          <div class="panel-heading">
+            <p class="eyebrow">Live Candidate</p>
+            <h2>Tune the mark</h2>
+            <p class="panel-copy">
+              The gallery below loads presets into this panel. From there you
+              can nudge line weight, spacing, depth, and motion.
+            </p>
+          </div>
+
+          <div class="control-grid">
+            <label class="control">
+              <span>Outer stroke</span>
+              <input id="outer-stroke" type="range" min="1" max="5" step="0.1" />
+              <output id="outer-stroke-value" for="outer-stroke"></output>
+            </label>
+
+            <label class="control">
+              <span>Middle stroke</span>
+              <input id="middle-stroke" type="range" min="1" max="5" step="0.1" />
+              <output id="middle-stroke-value" for="middle-stroke"></output>
+            </label>
+
+            <label class="control">
+              <span>Frame spacing</span>
+              <input id="middle-inset" type="range" min="16" max="28" step="1" />
+              <output id="middle-inset-value" for="middle-inset"></output>
+            </label>
+
+            <label class="control">
+              <span>Core gap</span>
+              <input id="inner-inset" type="range" min="34" max="60" step="1" />
+              <output id="inner-inset-value" for="inner-inset"></output>
+            </label>
+
+            <label class="control">
+              <span>Core chamfer</span>
+              <input id="core-cut" type="range" min="0" max="14" step="1" />
+              <output id="core-cut-value" for="core-cut"></output>
+            </label>
+
+            <label class="control">
+              <span>3D depth</span>
+              <input id="depth" type="range" min="0" max="18" step="1" />
+              <output id="depth-value" for="depth"></output>
+            </label>
+
+            <label class="control">
+              <span>Tilt</span>
+              <input id="tilt" type="range" min="0" max="18" step="1" />
+              <output id="tilt-value" for="tilt"></output>
+            </label>
+          </div>
+
+          <div class="motion-picker" id="motion-picker" role="radiogroup" aria-label="Motion mode">
+            <button type="button" class="motion-chip" data-motion="still" aria-pressed="false">Still</button>
+            <button type="button" class="motion-chip" data-motion="orbit" aria-pressed="false">Orbit</button>
+            <button type="button" class="motion-chip" data-motion="lock" aria-pressed="false">Lock</button>
+          </div>
+
+          <div class="share-tools">
+            <button type="button" class="share-btn" id="copy-config">Copy config</button>
+            <button type="button" class="share-btn" id="copy-link">Copy link</button>
+          </div>
+
+          <p class="candidate-summary" id="candidate-summary"></p>
+          <p class="share-status" id="share-status" aria-live="polite"></p>
+          <pre class="config-export" id="config-export"></pre>
+        </section>
+
+        <section class="panel preview-panel">
+          <div class="preview-copy">
+            <p class="eyebrow">Review</p>
+            <h2 id="candidate-title">Split-weight bevel</h2>
+            <p id="candidate-note">
+              Slightly heavier outer frame, lighter inner frame, and enough
+              depth to feel dimensional without turning toy-like.
+            </p>
+          </div>
+
+          <div class="preview-stage">
+            <div id="live-mark-slot"></div>
+          </div>
+        </section>
+      </main>
+
+      <section class="gallery-section">
+        <div class="section-heading">
+          <p class="eyebrow">Presets</p>
+          <h2>Quick reads</h2>
+          <p class="panel-copy">
+            These are fixed snapshots so the line choices are easier to compare
+            without motion noise.
+          </p>
+        </div>
+        <div class="gallery-grid" id="gallery-grid"></div>
+      </section>
+    </div>
+
+    <script src="/logo-lab/app.js"></script>
+  </body>
+</html>

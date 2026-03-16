@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>/guild Dev Dashboard</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <div class="backdrop"></div>
+    <main class="shell">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">Ops View</p>
+          <h1>/guild Dev Dashboard</h1>
+          <p class="lede">Live traffic, host health, voice load, and application pulse in one separate control surface.</p>
+        </div>
+        <div class="hero-meta">
+          <div class="pill" id="overall-status">Loading</div>
+          <div class="meta-block">
+            <span>Updated</span>
+            <strong id="updated-at">Waiting for first poll</strong>
+          </div>
+        </div>
+      </header>
+
+      <section class="overview-grid" id="overview-grid"></section>
+
+      <section class="content-grid">
+        <article class="panel chart-panel">
+          <div class="panel-head">
+            <h2>Traffic Pulse</h2>
+            <p>Requests, failures, and message flow over the last hour.</p>
+          </div>
+          <div class="chart-stack" id="traffic-charts"></div>
+        </article>
+
+        <article class="panel">
+          <div class="panel-head">
+            <h2>Health Checks</h2>
+            <p>Fast read on the things most likely to hurt user experience.</p>
+          </div>
+          <div class="health-list" id="health-checks"></div>
+        </article>
+
+        <article class="panel">
+          <div class="panel-head">
+            <h2>Application Footprint</h2>
+            <p>Users, sessions, messages, assets, and guild volume.</p>
+          </div>
+          <div class="stats-grid" id="app-counts"></div>
+        </article>
+
+        <article class="panel">
+          <div class="panel-head">
+            <h2>Voice + Media</h2>
+            <p>Live channel occupancy and mediasoup state.</p>
+          </div>
+          <div class="voice-wrap">
+            <div class="stats-grid" id="voice-summary"></div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Channel</th>
+                    <th>People</th>
+                    <th>Speakers</th>
+                    <th>Screen</th>
+                  </tr>
+                </thead>
+                <tbody id="voice-table"></tbody>
+              </table>
+            </div>
+          </div>
+        </article>
+
+        <article class="panel">
+          <div class="panel-head">
+            <h2>Host + Network</h2>
+            <p>VPS memory, disk, load, interfaces, and process pressure.</p>
+          </div>
+          <div class="stats-grid" id="host-summary"></div>
+          <div class="network-list" id="network-list"></div>
+        </article>
+
+        <article class="panel">
+          <div class="panel-head">
+            <h2>Recent Notes</h2>
+            <p>Warnings and errors captured by the runtime instrumentation.</p>
+          </div>
+          <div class="notes-list" id="notes-list"></div>
+        </article>
+      </section>
+    </main>
+    <script src="/app.js"></script>
+  </body>
+</html>

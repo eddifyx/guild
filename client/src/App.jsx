@@ -4,6 +4,7 @@ import { SecurityProvider, useSecurity } from './contexts/SecurityContext';
 import { SocketProvider } from './contexts/SocketContext';
 import { VoiceProvider } from './contexts/VoiceContext';
 import { GuildProvider, useGuild } from './contexts/GuildContext';
+import { OnlineUsersProvider } from './contexts/OnlineUsersContext';
 import LoginScreen from './components/Auth/LoginScreen';
 import MainLayout from './components/Layout/MainLayout';
 import HashLock from './components/Auth/HashLock';
@@ -94,9 +95,11 @@ function AppContent() {
   // Transition done - show guild gate (which shows selection or main app)
   return (
     <SocketProvider>
-      <GuildProvider>
-        <GuildGate />
-      </GuildProvider>
+      <OnlineUsersProvider>
+        <GuildProvider>
+          <GuildGate />
+        </GuildProvider>
+      </OnlineUsersProvider>
     </SocketProvider>
   );
 }

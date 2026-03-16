@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, Tray, ipcMain, Notification, dialog, desktopCapturer, session, shell, safeStorage } = require('electron');
+const { app, BrowserWindow, Menu, Tray, ipcMain, Notification, dialog, desktopCapturer, session, shell, safeStorage, systemPreferences } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -31,9 +31,12 @@ function getRuntimeProfile(argv = process.argv, env = process.env) {
   return null;
 }
 
+const PRODUCT_NAME = 'guild';
+const PRODUCT_SLUG = 'guild';
+const LEGACY_UPDATE_SLUG = 'Byzantine';
 const PROFILE_ID = getRuntimeProfile();
 const PROFILE_LABEL = PROFILE_ID ? ` (${PROFILE_ID})` : '';
-let profilePartition = 'persist:byzantine-default';
+let profilePartition = `persist:${PRODUCT_SLUG}-default`;
 
 if (PROFILE_ID) {
   const defaultUserDataPath = app.getPath('userData');
@@ -55,7 +58,7 @@ if (PROFILE_ID) {
   app.setPath('logs', profileLogsPath);
   app.commandLine.appendSwitch('user-data-dir', profileUserDataPath);
   app.commandLine.appendSwitch('disk-cache-dir', profileCachePath);
-  profilePartition = `persist:byzantine-profile-${PROFILE_ID}`;
+  profilePartition = `persist:${PRODUCT_SLUG}-profile-${PROFILE_ID}`;
 }
 
 function loadSignalBridge() {
@@ -76,7 +79,10 @@ function loadSignalBridge() {
 const { registerSignalHandlers } = loadSignalBridge();
 
 app.disableHardwareAcceleration();
-app.setAppUserModelId(`byzantine.${PROFILE_ID || 'default'}`);
+app.setAppUserModelId(`${PRODUCT_SLUG}.${PROFILE_ID || 'default'}`);
+app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
+app.commandLine.appendSwitch('disable-renderer-backgrounding');
+app.commandLine.appendSwitch('disable-background-timer-throttling');
 
 // Single-instance lock for the active profile.
 const gotTheLock = app.requestSingleInstanceLock({ profile: PROFILE_ID || 'default' });
@@ -87,13 +93,23 @@ if (!gotTheLock) {
 let mainWindow;
 let tray = null;
 let pendingSourceId = null;
+const perfSamples = [];
+const PERF_SAMPLE_LIMIT = 200;
 const messageCacheStates = new Map();
 const MESSAGE_CACHE_LIMIT = 400;
 const MESSAGE_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const APPLE_VOICE_HELPER_RELATIVE_DIR = path.join('electron', 'native', 'appleVoiceProcessing');
+const APPLE_VOICE_HELPER_SOURCE_NAME = 'AppleVoiceIsolationCapture.swift';
+const APPLE_VOICE_HELPER_BINARY_NAME = 'apple-voice-isolation-capture';
 
 // Desktop source cache for Mac, pre-warmed when joining a voice channel.
 // so the source picker opens instantly instead of waiting for desktopCapturer
 let desktopSourceCache = { sources: null, windows: null, thumbnails: null, time: 0 };
+let appleVoiceCaptureSession = null;
+let appleVoiceCaptureStartPromise = null;
+let appleVoiceCaptureDisabledReason = null;
+let appleVoiceCaptureOwners = new Set();
+const APPLE_VOICE_FIRST_FRAME_TIMEOUT_MS = 1200;
 
 function encodeCacheSegment(value) {
   return Buffer.from(String(value || 'default'))
@@ -237,15 +253,448 @@ function flushAllMessageCacheStates() {
   }
 }
 
+function recordPerfSample(sample) {
+  if (!sample || process.env.NODE_ENV === 'production') return;
+
+  const normalized = {
+    ...sample,
+    receivedAt: new Date().toISOString(),
+  };
+
+  perfSamples.push(normalized);
+  if (perfSamples.length > PERF_SAMPLE_LIMIT) {
+    perfSamples.splice(0, perfSamples.length - PERF_SAMPLE_LIMIT);
+  }
+
+  try {
+    console.info('[Perf]', JSON.stringify(normalized));
+  } catch {
+    console.info('[Perf]', normalized);
+  }
+}
+
+function isAppleVoiceCapturePlatformSupported() {
+  return process.platform === 'darwin' && process.arch === 'arm64';
+}
+
+function isAppleVoiceCaptureSupported() {
+  return isAppleVoiceCapturePlatformSupported() && !appleVoiceCaptureDisabledReason;
+}
+
+function shouldDisableAppleVoiceCaptureForMessage(message = '') {
+  const normalized = String(message || '').toLowerCase();
+  return normalized.includes('could not initialize the audio unit')
+    || normalized.includes('could not create the audio unit')
+    || normalized.includes('could not configure')
+    || normalized.includes('voiceprocessingi/o is unavailable')
+    || normalized.includes('voiceprocessingio is unavailable');
+}
+
+function markAppleVoiceCaptureUnavailable(message) {
+  if (!message || appleVoiceCaptureDisabledReason) {
+    return;
+  }
+
+  appleVoiceCaptureDisabledReason = message;
+  emitAppleVoiceCaptureState({
+    type: 'unavailable',
+    message,
+  });
+}
+
+function getAppleVoiceHelperSourceCandidates() {
+  return [
+    path.join(__dirname, '..', '..', APPLE_VOICE_HELPER_RELATIVE_DIR, APPLE_VOICE_HELPER_SOURCE_NAME),
+    path.join(__dirname, APPLE_VOICE_HELPER_RELATIVE_DIR.replace(/^electron\//, ''), APPLE_VOICE_HELPER_SOURCE_NAME),
+  ];
+}
+
+function getAppleVoiceHelperBinaryCandidates() {
+  return [
+    path.join(__dirname, '..', '..', APPLE_VOICE_HELPER_RELATIVE_DIR, 'bin', APPLE_VOICE_HELPER_BINARY_NAME),
+    path.join(__dirname, APPLE_VOICE_HELPER_RELATIVE_DIR.replace(/^electron\//, ''), 'bin', APPLE_VOICE_HELPER_BINARY_NAME),
+  ];
+}
+
+function findExistingPath(candidates) {
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+function readJsonLine(line) {
+  try {
+    return JSON.parse(line);
+  } catch {
+    return null;
+  }
+}
+
+function emitAppleVoiceCaptureState(payload) {
+  mainWindow?.webContents.send('apple-voice-capture-state', payload);
+}
+
+function normalizeAppleVoiceCaptureOwnerId(ownerId) {
+  if (typeof ownerId !== 'string') {
+    return 'default';
+  }
+  const normalized = ownerId.trim();
+  return normalized || 'default';
+}
+
+async function ensureAppleVoiceHelperBinary() {
+  if (!isAppleVoiceCapturePlatformSupported()) {
+    throw new Error('Apple voice processing is only available on Apple silicon Macs.');
+  }
+
+  const sourcePath = findExistingPath(getAppleVoiceHelperSourceCandidates());
+  if (!sourcePath) {
+    throw new Error('Apple voice helper source is missing from the app bundle.');
+  }
+
+  const packagedBinaryPath = findExistingPath(getAppleVoiceHelperBinaryCandidates());
+  if (app.isPackaged) {
+    if (!packagedBinaryPath) {
+      throw new Error('Apple voice helper binary is missing from the packaged app.');
+    }
+    return packagedBinaryPath;
+  }
+
+  const binaryDir = path.join(path.dirname(sourcePath), 'bin');
+  const binaryPath = packagedBinaryPath || path.join(binaryDir, APPLE_VOICE_HELPER_BINARY_NAME);
+  const shouldCompile =
+    !fs.existsSync(binaryPath)
+    || fs.statSync(binaryPath).mtimeMs < fs.statSync(sourcePath).mtimeMs;
+
+  if (!shouldCompile) {
+    return binaryPath;
+  }
+
+  fs.mkdirSync(binaryDir, { recursive: true });
+  const moduleCachePath = path.join(binaryDir, '.swift-module-cache');
+  const tempDir = path.join(binaryDir, '.swift-tmp');
+  fs.mkdirSync(moduleCachePath, { recursive: true });
+  fs.mkdirSync(tempDir, { recursive: true });
+
+  await new Promise((resolve, reject) => {
+    const compile = spawn(
+      'swiftc',
+      ['-module-cache-path', moduleCachePath, '-O', sourcePath, '-o', binaryPath],
+      {
+        env: {
+          ...process.env,
+          SWIFT_MODULECACHE_PATH: moduleCachePath,
+          TMPDIR: tempDir,
+        },
+      }
+    );
+    let stderr = '';
+
+    compile.stderr.on('data', (chunk) => {
+      stderr += chunk.toString();
+    });
+
+    compile.on('error', (error) => {
+      reject(error);
+    });
+
+    compile.on('close', (code) => {
+      if (code === 0) {
+        fs.chmodSync(binaryPath, 0o755);
+        resolve();
+        return;
+      }
+
+      reject(new Error(stderr.trim() || `swiftc exited with code ${code}`));
+    });
+  });
+
+  return binaryPath;
+}
+
+async function primeAppleVoiceCapture() {
+  if (!isAppleVoiceCapturePlatformSupported()) {
+    return { supported: false };
+  }
+
+  const binaryPath = await ensureAppleVoiceHelperBinary();
+  return {
+    supported: isAppleVoiceCaptureSupported(),
+    binaryPath,
+    disabledReason: appleVoiceCaptureDisabledReason,
+  };
+}
+
+function stopAppleVoiceCaptureSession(ownerId = null, { force = false } = {}) {
+  if (force) {
+    appleVoiceCaptureOwners.clear();
+  } else if (ownerId !== null) {
+    appleVoiceCaptureOwners.delete(normalizeAppleVoiceCaptureOwnerId(ownerId));
+  } else {
+    appleVoiceCaptureOwners.clear();
+  }
+
+  if (appleVoiceCaptureOwners.size > 0) {
+    return false;
+  }
+
+  const sessionState = appleVoiceCaptureSession;
+  appleVoiceCaptureStartPromise = null;
+  if (!sessionState) {
+    return false;
+  }
+
+  appleVoiceCaptureSession = null;
+  sessionState.stopping = true;
+  sessionState.stdoutBuffer = Buffer.alloc(0);
+  if (sessionState.firstFrameTimeout) {
+    clearTimeout(sessionState.firstFrameTimeout);
+    sessionState.firstFrameTimeout = null;
+  }
+
+  try {
+    sessionState.proc.stdout.removeAllListeners('data');
+    sessionState.proc.stderr.removeAllListeners('data');
+  } catch {}
+
+  try {
+    sessionState.proc.kill('SIGTERM');
+  } catch {}
+
+  return true;
+}
+
+async function startAppleVoiceCaptureSession(ownerId = 'default') {
+  if (!isAppleVoiceCaptureSupported()) {
+    throw new Error(appleVoiceCaptureDisabledReason || 'Apple voice processing is unavailable on this Mac.');
+  }
+
+  const normalizedOwnerId = normalizeAppleVoiceCaptureOwnerId(ownerId);
+  appleVoiceCaptureOwners.add(normalizedOwnerId);
+
+  if (appleVoiceCaptureSession?.ready && appleVoiceCaptureSession.firstFrameReceived) {
+    return appleVoiceCaptureSession.metadata;
+  }
+
+  if (appleVoiceCaptureStartPromise) {
+    return appleVoiceCaptureStartPromise.catch((error) => {
+      appleVoiceCaptureOwners.delete(normalizedOwnerId);
+      throw error;
+    });
+  }
+
+  stopAppleVoiceCaptureSession(null, { force: true });
+  appleVoiceCaptureOwners.add(normalizedOwnerId);
+
+  const helperBinary = await ensureAppleVoiceHelperBinary();
+  const proc = spawn(helperBinary, [], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  const sessionState = {
+    proc,
+    ready: false,
+    stopping: false,
+    metadata: null,
+    stdoutBuffer: Buffer.alloc(0),
+    frameBytes: 0,
+    firstFrameReceived: false,
+    firstFrameTimeout: null,
+  };
+  appleVoiceCaptureSession = sessionState;
+
+  appleVoiceCaptureStartPromise = new Promise((resolve, reject) => {
+    let settled = false;
+    let stderrBuffer = '';
+
+    const resolveOnce = (value) => {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    };
+
+    const rejectOnce = (error) => {
+      if (settled) return;
+      settled = true;
+      reject(error);
+    };
+
+    proc.stdout.on('data', (chunk) => {
+      if (!sessionState.ready || sessionState.frameBytes <= 0 || appleVoiceCaptureSession !== sessionState) {
+        return;
+      }
+
+      sessionState.stdoutBuffer = Buffer.concat([sessionState.stdoutBuffer, chunk]);
+
+      while (sessionState.stdoutBuffer.length >= sessionState.frameBytes) {
+        const frame = sessionState.stdoutBuffer.subarray(0, sessionState.frameBytes);
+        sessionState.stdoutBuffer = sessionState.stdoutBuffer.subarray(sessionState.frameBytes);
+        if (!sessionState.firstFrameReceived) {
+          sessionState.firstFrameReceived = true;
+          if (sessionState.firstFrameTimeout) {
+            clearTimeout(sessionState.firstFrameTimeout);
+            sessionState.firstFrameTimeout = null;
+          }
+          resolveOnce(sessionState.metadata);
+        }
+        mainWindow?.webContents.send('apple-voice-capture-frame', frame);
+      }
+    });
+
+    proc.stderr.on('data', (chunk) => {
+      stderrBuffer += chunk.toString();
+      let newlineIndex = stderrBuffer.indexOf('\n');
+
+      while (newlineIndex !== -1) {
+        const line = stderrBuffer.slice(0, newlineIndex).trim();
+        stderrBuffer = stderrBuffer.slice(newlineIndex + 1);
+
+        if (line) {
+          const payload = readJsonLine(line);
+          if (payload?.type === 'ready') {
+            sessionState.ready = true;
+            sessionState.metadata = {
+              backend: 'apple-voice-processing',
+              sampleRate: payload.sampleRate || 48000,
+              channels: payload.channels || 1,
+              frameSamples: payload.frameSamples || 960,
+              voiceProcessingEnabled: payload.voiceProcessingEnabled !== false,
+              inputSampleRate: payload.inputSampleRate || null,
+              inputChannels: payload.inputChannels || null,
+              configuration: payload.configuration || null,
+            };
+            sessionState.frameBytes = sessionState.metadata.frameSamples * 2 * sessionState.metadata.channels;
+            if (sessionState.firstFrameTimeout) {
+              clearTimeout(sessionState.firstFrameTimeout);
+            }
+            sessionState.firstFrameTimeout = setTimeout(() => {
+              if (
+                settled
+                || sessionState.stopping
+                || sessionState.firstFrameReceived
+                || appleVoiceCaptureSession !== sessionState
+              ) {
+                return;
+              }
+
+              const error = new Error('Mac voice cleanup was ready but microphone audio never arrived.');
+              emitAppleVoiceCaptureState({
+                type: 'error',
+                message: error.message,
+              });
+              stopAppleVoiceCaptureSession(null, { force: true });
+              rejectOnce(error);
+            }, APPLE_VOICE_FIRST_FRAME_TIMEOUT_MS);
+            sessionState.firstFrameTimeout.unref?.();
+            emitAppleVoiceCaptureState({
+              type: 'ready',
+              ...sessionState.metadata,
+            });
+          } else if (payload?.type === 'error' || payload?.type === 'fatal') {
+            const message = payload.message || 'Apple voice processing failed.';
+            if (payload.type === 'fatal' && shouldDisableAppleVoiceCaptureForMessage(message)) {
+              markAppleVoiceCaptureUnavailable(message);
+            }
+            if (payload.type === 'fatal' && !settled) {
+              rejectOnce(new Error(message));
+            } else {
+              emitAppleVoiceCaptureState({
+                type: 'error',
+                message,
+              });
+            }
+          }
+        }
+
+        newlineIndex = stderrBuffer.indexOf('\n');
+      }
+    });
+
+    proc.on('error', (error) => {
+      if (sessionState.firstFrameTimeout) {
+        clearTimeout(sessionState.firstFrameTimeout);
+        sessionState.firstFrameTimeout = null;
+      }
+      if (appleVoiceCaptureSession === sessionState) {
+        appleVoiceCaptureSession = null;
+        appleVoiceCaptureOwners.clear();
+      }
+      rejectOnce(error);
+    });
+
+    proc.on('close', (code, signal) => {
+      if (sessionState.firstFrameTimeout) {
+        clearTimeout(sessionState.firstFrameTimeout);
+        sessionState.firstFrameTimeout = null;
+      }
+      const wasActiveSession = appleVoiceCaptureSession === sessionState;
+      if (wasActiveSession) {
+        appleVoiceCaptureSession = null;
+        appleVoiceCaptureOwners.clear();
+      }
+
+      if (sessionState.stopping) {
+        emitAppleVoiceCaptureState({ type: 'stopped' });
+        resolveOnce(sessionState.metadata || null);
+        return;
+      }
+
+      const error = new Error(
+        stderrBuffer.trim() || `Apple voice processing exited unexpectedly (${signal || code || 'unknown'}).`
+      );
+      if (!sessionState.stopping && shouldDisableAppleVoiceCaptureForMessage(error.message)) {
+        markAppleVoiceCaptureUnavailable(error.message);
+      }
+      emitAppleVoiceCaptureState({
+        type: 'ended',
+        code,
+        signal,
+        message: error.message,
+      });
+      rejectOnce(error);
+    });
+  });
+
+  return appleVoiceCaptureStartPromise
+    .finally(() => {
+      if (appleVoiceCaptureStartPromise) {
+        appleVoiceCaptureStartPromise = null;
+      }
+    })
+    .catch((error) => {
+      appleVoiceCaptureOwners.delete(normalizedOwnerId);
+      throw error;
+    });
+}
+
 function registerDisplayMediaHandler(targetSession) {
   if (!targetSession?.setDisplayMediaRequestHandler) return;
 
   targetSession.setDisplayMediaRequestHandler((request, callback) => {
     // Use zero-size thumbnails; we only need the source ID, not screenshots.
     desktopCapturer.getSources({ types: ['screen', 'window'], thumbnailSize: { width: 0, height: 0 } }).then((sources) => {
-      const selected = pendingSourceId ? sources.find(s => s.id === pendingSourceId) : null;
+      const selectedSourceId = pendingSourceId;
       pendingSourceId = null;
-      callback({ video: selected || sources[0], audio: 'loopback' });
+      const selected = selectedSourceId ? sources.find(s => s.id === selectedSourceId) : null;
+      const fallback = selected || sources[0];
+      if (!fallback) {
+        console.warn('[ScreenShare] No display sources available for getDisplayMedia request');
+        callback({});
+        return;
+      }
+
+      const response = { video: fallback };
+      if (request.audioRequested && process.platform === 'win32') {
+        response.audio = 'loopback';
+      }
+      callback(response);
+    }).catch((err) => {
+      pendingSourceId = null;
+      console.warn('[ScreenShare] Failed to enumerate display sources:', err);
+      callback({});
     });
   });
 }
@@ -284,6 +733,7 @@ const createWindow = () => {
       contextIsolation: true,
       nodeIntegration: false,
       partition: profilePartition,
+      backgroundThrottling: false,
     },
   });
 
@@ -396,6 +846,14 @@ app.whenReady().then(() => {
   registerSignalHandlers(ipcMain);
   createWindow();
 
+  if (isAppleVoiceCaptureSupported()) {
+    setTimeout(() => {
+      void primeAppleVoiceCapture().catch((error) => {
+        console.warn('[Voice] Apple voice helper warm-up failed:', error?.message || error);
+      });
+    }, 1200);
+  }
+
   // Enable screen capture for getDisplayMedia() on both the default session
   // and the active profile partition used by this window.
   registerDisplayMediaHandler(session.defaultSession);
@@ -446,6 +904,7 @@ app.whenReady().then(() => {
 });
 
 app.on('before-quit', () => {
+  stopAppleVoiceCaptureSession();
   flushAllMessageCacheStates();
 });
 
@@ -464,9 +923,29 @@ ipcMain.handle('window-maximize', () => {
   else mainWindow?.maximize();
 });
 ipcMain.handle('window-close', () => mainWindow?.close());
+ipcMain.handle('app-relaunch', () => {
+  try {
+    app.relaunch();
+    app.quit();
+    return true;
+  } catch (err) {
+    console.warn('[App] Failed to relaunch:', err);
+    return false;
+  }
+});
 
 // App version IPC used by the renderer to compare against the server version.
 ipcMain.handle('get-app-version', () => APP_VERSION);
+ipcMain.handle('apple-voice-capture-supported', () => isAppleVoiceCaptureSupported());
+ipcMain.handle('apple-voice-capture-prime', async () => {
+  return primeAppleVoiceCapture();
+});
+ipcMain.handle('apple-voice-capture-start', async (_event, ownerId) => {
+  return startAppleVoiceCaptureSession(ownerId);
+});
+ipcMain.handle('apple-voice-capture-stop', (_event, ownerId) => {
+  return stopAppleVoiceCaptureSession(ownerId);
+});
 
 // Screen sharing: pre-fetch sources on Mac when joining a voice channel
 // so the picker opens instantly later (desktopCapturer is slow on macOS)
@@ -568,6 +1047,27 @@ ipcMain.handle('select-desktop-source', (event, sourceId) => {
   pendingSourceId = sourceId;
 });
 
+ipcMain.handle('get-screen-capture-access-status', () => {
+  if (process.platform !== 'darwin') return 'granted';
+  try {
+    return systemPreferences.getMediaAccessStatus('screen');
+  } catch (err) {
+    console.warn('[ScreenShare] Failed to read screen capture permission:', err);
+    return 'unknown';
+  }
+});
+
+ipcMain.handle('open-screen-capture-settings', async () => {
+  if (process.platform !== 'darwin') return false;
+  try {
+    await shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture');
+    return true;
+  } catch (err) {
+    console.warn('[ScreenShare] Failed to open Screen Recording settings:', err);
+    return false;
+  }
+});
+
 // Notification IPC
 ipcMain.handle('show-notification', (event, { title, body }) => {
   if (Notification.isSupported()) {
@@ -630,6 +1130,12 @@ ipcMain.handle('message-cache:delete', (event, userId, messageId) => {
   return true;
 });
 
+ipcMain.on('perf:sample', (_event, sample) => {
+  recordPerfSample(sample);
+});
+
+ipcMain.handle('perf:get-samples', () => perfSamples.slice());
+
 // Open URL in system default browser
 ipcMain.handle('open-external', (event, url) => {
   if (typeof url === 'string' && (url.startsWith('https://') || url.startsWith('http://'))) {
@@ -639,11 +1145,13 @@ ipcMain.handle('open-external', (event, url) => {
 
 // Self-update: download zip from server
 ipcMain.handle('download-update', async (event, serverUrl) => {
-  const tempDir = path.join(os.tmpdir(), 'byzantine-update-' + Date.now());
+  const tempDir = path.join(os.tmpdir(), `${PRODUCT_SLUG}-update-` + Date.now());
   fs.mkdirSync(tempDir, { recursive: true });
   const zipPath = path.join(tempDir, 'update.zip');
   const plat = process.platform === 'darwin' ? `darwin-${process.arch}` : `${process.platform}-${process.arch}`;
-  const zipUrl = `${serverUrl}/updates/Byzantine-latest-${plat}.zip`;
+  // Keep the legacy update basename for one bridge release so existing installs
+  // can still discover the renamed app build without a separate migration flow.
+  const zipUrl = `${serverUrl}/updates/${LEGACY_UPDATE_SLUG}-latest-${plat}.zip`;
 
   return new Promise((resolve, reject) => {
     const client = zipUrl.startsWith('https') ? https : http;
@@ -716,7 +1224,9 @@ ipcMain.handle('apply-update', async (event, { zipPath, tempDir }) => {
     // macOS: use unzip
     await new Promise((resolve, reject) => {
       fs.mkdirSync(extractDir, { recursive: true });
-      const proc = spawn('unzip', ['-o', zipPath, '-d', extractDir]);
+      const proc = spawn('unzip', ['-o', zipPath, '-d', extractDir], {
+        stdio: 'ignore',
+      });
       proc.on('close', (code) => {
         if (code === 0) resolve();
         else reject(new Error(`Extraction failed (code ${code})`));
@@ -729,7 +1239,9 @@ ipcMain.handle('apply-update', async (event, { zipPath, tempDir }) => {
       const ps = spawn('powershell.exe', [
         '-NoProfile', '-Command',
         `Expand-Archive -Path '${zipPath}' -DestinationPath '${extractDir}' -Force`,
-      ]);
+      ], {
+        stdio: 'ignore',
+      });
       ps.on('close', (code) => {
         if (code === 0) resolve();
         else reject(new Error(`Extraction failed (code ${code})`));
@@ -748,7 +1260,7 @@ ipcMain.handle('apply-update', async (event, { zipPath, tempDir }) => {
 
   if (process.platform === 'darwin') {
     // macOS: find the .app bundle and replace the current one
-    const appBundleName = 'Byzantine.app';
+    const appBundleName = `${PRODUCT_NAME}.app`;
     let newAppPath = path.join(sourceDir, appBundleName);
 
     // The app might be nested inside a folder, so search for it.
@@ -770,7 +1282,7 @@ ipcMain.handle('apply-update', async (event, { zipPath, tempDir }) => {
     // Current .app bundle path: go up from the executable
     // Example: /Applications/<App>.app/Contents/MacOS/<App>
     const currentAppPath = process.execPath.replace(/\/Contents\/MacOS\/.*$/, '');
-    const logPath = path.join(os.tmpdir(), 'byzantine-update.log');
+    const logPath = path.join(os.tmpdir(), `${PRODUCT_SLUG}-update.log`);
 
     // Shell script: kill app, replace the .app bundle, relaunch.
     const shPath = path.join(tempDir, 'update.sh');
@@ -804,7 +1316,7 @@ ipcMain.handle('apply-update', async (event, { zipPath, tempDir }) => {
     // Windows: batch script with robocopy
     const appDir = path.dirname(process.execPath);
     const exeName = path.basename(process.execPath);
-    const logPath = path.join(os.tmpdir(), 'byzantine-update.log');
+    const logPath = path.join(os.tmpdir(), `${PRODUCT_SLUG}-update.log`);
     const batPath = path.join(tempDir, 'update.bat');
     const batContent = [
       '@echo off',
@@ -840,4 +1352,3 @@ ipcMain.handle('apply-update', async (event, { zipPath, tempDir }) => {
     app.quit();
   }
 });
-

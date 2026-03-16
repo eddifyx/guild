@@ -9,8 +9,9 @@ const {
   deleteMessageAttachments, getMessageAttachments,
   getUploadedFileById, getOwnedUnclaimedUploadedFile, getUploadedFilesByMessageId,
   claimUploadedFileForRoomMessage, claimUploadedFileForDMMessage,
-  deleteUploadedFileRecord,
+  deleteUploadedFileRecord, upsertSenderKeyDistribution,
 } = require('../db');
+const runtimeMetrics = require('../monitoring/runtimeMetrics');
 
 const MAX_ATTACHMENTS = 10;
 const MAX_CONTENT_LENGTH = 64 * 1024; // 64KB max message content
@@ -48,6 +49,10 @@ function handleChat(io, socket) {
         handler(data, done);
       } catch (err) {
         console.error(`Socket handler error [${userId}]:`, err);
+        runtimeMetrics.recordChatError('socket_handler_exception', {
+          userId,
+          message: err.message,
+        });
         done({ ok: false, error: 'Internal server error' });
       }
     };
@@ -218,6 +223,11 @@ function handleChat(io, socket) {
     };
 
     io.to(`room:${roomId}`).emit('room:message', message);
+    runtimeMetrics.recordChatMessage('room', {
+      roomId,
+      encrypted: !!encrypted,
+      attachmentCount: savedAttachments.length,
+    });
     ack({ ok: true, messageId: msgId });
   }));
 
@@ -280,10 +290,15 @@ function handleChat(io, socket) {
 
     io.to(`user:${toUserId}`).emit('dm:message', message);
     io.to(`user:${userId}`).emit('dm:message', message);
+    runtimeMetrics.recordChatMessage('dm', {
+      toUserId,
+      encrypted: !!encrypted,
+      attachmentCount: savedAttachments.length,
+    });
     ack({ ok: true, messageId: msgId });
   }));
 
-  socket.on('dm:sender_key', safe(({ toUserId, envelope }, ack) => {
+  socket.on('dm:sender_key', safe(({ toUserId, envelope, roomId = null, distributionId = null }, ack) => {
     if (!toUserId || !envelope) return ack({ ok: false, error: 'Recipient and envelope required' });
     if (!checkRate(_rl.messages, SOCKET_RL_MAX_MESSAGES)) return ack({ ok: false, error: 'Rate limit exceeded' });
     const recipient = getUserById.get(toUserId);
@@ -295,10 +310,52 @@ function handleChat(io, socket) {
       return ack({ ok: false, error: 'Invalid sender key envelope' });
     }
     const sender = getUserById.get(userId);
+    let controlMessageId = null;
+    if (roomId !== null || distributionId !== null) {
+      if (typeof roomId !== 'string' || !roomId || typeof distributionId !== 'string' || !distributionId) {
+        return ack({ ok: false, error: 'Invalid sender key metadata' });
+      }
+      if (!isRoomMember.get(roomId, userId) || !isRoomMember.get(roomId, toUserId)) {
+        return ack({ ok: false, error: 'Sender key metadata does not match room membership' });
+      }
+      controlMessageId = uuidv4();
+      upsertSenderKeyDistribution.run(
+        controlMessageId,
+        roomId,
+        userId,
+        toUserId,
+        distributionId,
+        envelope
+      );
+    }
     io.to(`user:${toUserId}`).emit('dm:sender_key', {
+      id: controlMessageId,
       fromUserId: userId,
       senderNpub: sender?.npub || null,
       envelope,
+      roomId,
+      distributionId,
+    });
+    ack({ ok: true });
+  }));
+
+  socket.on('room:request_sender_key', safe(({ roomId, senderUserId }, ack) => {
+    if (!roomId || !senderUserId) {
+      return ack({ ok: false, error: 'Room ID and sender user ID are required' });
+    }
+    if (!checkRate(_rl.messages, SOCKET_RL_MAX_MESSAGES)) {
+      return ack({ ok: false, error: 'Rate limit exceeded' });
+    }
+    if (!isRoomMember.get(roomId, userId)) {
+      return ack({ ok: false, error: 'Not a member of this room' });
+    }
+    if (!isRoomMember.get(roomId, senderUserId)) {
+      return ack({ ok: false, error: 'Requested sender is not a member of this room' });
+    }
+
+    io.to(`user:${senderUserId}`).emit('room:sender_key_requested', {
+      roomId,
+      requestedByUserId: userId,
     });
     ack({ ok: true });
   }));
