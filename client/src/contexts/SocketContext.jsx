@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useState } from 'react';
+import { createContext, useContext, useEffect, useMemo, useState } from 'react';
 import { connectSocket, disconnectSocket } from '../socket';
 import { useAuth } from './AuthContext';
 
@@ -47,8 +47,10 @@ export function SocketProvider({ children }) {
     };
   }, [user, logout]);
 
+  const value = useMemo(() => ({ socket, connected }), [socket, connected]);
+
   return (
-    <SocketContext.Provider value={{ socket, connected }}>
+    <SocketContext.Provider value={value}>
       {children}
     </SocketContext.Provider>
   );

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { memo, useState, useEffect, useCallback, useMemo } from 'react';
 import { useAuth } from '../../contexts/AuthContext';
 import { useSocket } from '../../contexts/SocketContext';
 import { useVoiceContext } from '../../contexts/VoiceContext';
@@ -18,9 +18,10 @@ import GuildSettingsModal from '../Guild/GuildSettingsModal';
 import InviteGuildModal from '../Guild/InviteGuildModal';
 import UserProfileCard from '../Common/UserProfileCard';
 import { rememberUserNpub, rememberUsers, trustUserNpub } from '../../crypto/identityDirectory.js';
+import { startPerfTrace } from '../../utils/devPerf';
 
 
-export default function Sidebar({ rooms, myRooms, createRoom, joinRoom, renameRoom, deleteRoom, conversation, onSelectRoom, onSelectDM, onSelectAssetDump, onSelectAddons, onSelectStream, onSelectNostrProfile, onSelectVoiceChannel, unreadCounts, unreadRoomCounts }) {
+function Sidebar({ rooms, myRooms, createRoom, joinRoom, renameRoom, deleteRoom, conversation, onSelectRoom, onSelectDM, onSelectAssetDump, onSelectAddons, onSelectStream, onSelectNostrProfile, onSelectVoiceChannel, unreadCounts, unreadRoomCounts }) {
   const { user, logout } = useAuth();
   const { connected } = useSocket();
   const { onlineUsers, onlineIds } = useOnlineUsers();
@@ -32,14 +33,31 @@ export default function Sidebar({ rooms, myRooms, createRoom, joinRoom, renameRo
   const [showCreateVoice, setShowCreateVoice] = useState(false);
   const [showAudioSettings, setShowAudioSettings] = useState(false);
   const [showGuildSettings, setShowGuildSettings] = useState(false);
+  const [audioSettingsOpenTraceId, setAudioSettingsOpenTraceId] = useState(null);
+  const [guildSettingsOpenTraceId, setGuildSettingsOpenTraceId] = useState(null);
   const [showInviteGuild, setShowInviteGuild] = useState(false);
   const [profileCard, setProfileCard] = useState(null);
   const [sidebarGuildImgFailed, setSidebarGuildImgFailed] = useState(false);
-  const prevSidebarGuildImg = useRef(currentGuildData?.image_url);
-  if (prevSidebarGuildImg.current !== currentGuildData?.image_url) {
-    prevSidebarGuildImg.current = currentGuildData?.image_url;
-    setSidebarGuildImgFailed(false);
-  }
+  const closeAudioSettings = useCallback(() => {
+    setShowAudioSettings(false);
+    setAudioSettingsOpenTraceId(null);
+  }, []);
+  const closeGuildSettings = useCallback(() => {
+    setShowGuildSettings(false);
+    setGuildSettingsOpenTraceId(null);
+  }, []);
+  const openAudioSettings = useCallback(() => {
+    setAudioSettingsOpenTraceId(startPerfTrace('audio-settings-open', {
+      surface: 'sidebar',
+    }));
+    setShowAudioSettings(true);
+  }, []);
+  const openGuildSettings = useCallback(() => {
+    setGuildSettingsOpenTraceId(startPerfTrace('guild-settings-open', {
+      surface: 'sidebar',
+    }));
+    setShowGuildSettings(true);
+  }, []);
 
   const [muteRooms, setMuteRooms] = useState(() => localStorage.getItem('notify:muteRooms') === 'true');
   const [muteDMs, setMuteDMs] = useState(() => localStorage.getItem('notify:muteDMs') === 'true');
@@ -47,6 +65,68 @@ export default function Sidebar({ rooms, myRooms, createRoom, joinRoom, renameRo
   useEffect(() => {
     rememberUsers(onlineUsers);
   }, [onlineUsers]);
+
+  useEffect(() => {
+    setSidebarGuildImgFailed(false);
+  }, [currentGuildData?.image_url]);
+
+  const guildMembersById = useMemo(() => new Map(
+    (currentGuildData?.members || []).map((member) => [member.id, member])
+  ), [currentGuildData?.members]);
+  const onlineUsersById = useMemo(() => new Map(
+    onlineUsers.map((entry) => [entry.userId, entry])
+  ), [onlineUsers]);
+
+  const resolveDMUserMeta = useCallback((otherUserId, fallback = {}) => {
+    const guildMember = guildMembersById.get(otherUserId);
+    const onlineUser = onlineUsersById.get(otherUserId);
+
+    return {
+      username:
+        guildMember?.username
+        || onlineUser?.username
+        || fallback.username
+        || otherUserId,
+      avatarColor:
+        guildMember?.avatarColor
+        || guildMember?.avatar_color
+        || onlineUser?.avatarColor
+        || fallback.avatarColor
+        || '#40FF40',
+      npub:
+        guildMember?.npub
+        || onlineUser?.npub
+        || fallback.npub
+        || null,
+    };
+  }, [guildMembersById, onlineUsersById]);
+
+  const mergeDMConversationMeta = useCallback((conversation, fallback = {}) => {
+    const resolved = resolveDMUserMeta(conversation.other_user_id, {
+      username: fallback.username || conversation.other_username,
+      avatarColor: fallback.avatarColor || conversation.other_avatar_color,
+      npub: fallback.npub || conversation.other_npub,
+    });
+
+    const nextUsername = resolved.username || conversation.other_username || conversation.other_user_id;
+    const nextAvatarColor = resolved.avatarColor || conversation.other_avatar_color || '#40FF40';
+    const nextNpub = resolved.npub || conversation.other_npub || null;
+
+    if (
+      conversation.other_username === nextUsername
+      && conversation.other_avatar_color === nextAvatarColor
+      && conversation.other_npub === nextNpub
+    ) {
+      return conversation;
+    }
+
+    return {
+      ...conversation,
+      other_username: nextUsername,
+      other_avatar_color: nextAvatarColor,
+      other_npub: nextNpub,
+    };
+  }, [resolveDMUserMeta]);
 
   const refreshDmConversations = useCallback(async () => {
     const convs = await api('/api/dm/conversations');
@@ -61,6 +141,20 @@ export default function Sidebar({ rooms, myRooms, createRoom, joinRoom, renameRo
   }, []);
 
   useEffect(() => {
+    setDMConversations((prev) => {
+      let changed = false;
+      const next = prev.map((conversation) => {
+        const updated = mergeDMConversationMeta(conversation);
+        if (updated !== conversation) {
+          changed = true;
+        }
+        return updated;
+      });
+      return changed ? next : prev;
+    });
+  }, [mergeDMConversationMeta]);
+
+  useEffect(() => {
     refreshDmConversations().catch(console.error);
   }, [refreshDmConversations, currentGuild]);
 
@@ -70,26 +164,44 @@ export default function Sidebar({ rooms, myRooms, createRoom, joinRoom, renameRo
 
     const handleDM = (msg) => {
       const otherId = msg.sender_id === user.userId ? msg.dm_partner_id : msg.sender_id;
-      const otherName = msg.sender_id === user.userId ? null : msg.sender_name;
+      const fallbackUsername = msg.sender_id === user.userId ? null : msg.sender_name;
+      const fallbackAvatarColor = msg.sender_id === user.userId ? null : msg.sender_color;
+      const fallbackNpub = msg.sender_id === user.userId ? null : msg.sender_npub;
       if (msg.sender_id !== user.userId && msg.sender_npub) {
         rememberUserNpub(otherId, msg.sender_npub);
       }
 
       setDMConversations(prev => {
-        const exists = prev.find(c => c.other_user_id === otherId);
-        if (exists) return prev;
-        return [...prev, {
-          other_user_id: otherId,
-          other_username: otherName || otherId,
-          other_avatar_color: msg.sender_color || '#40FF40',
-          other_npub: msg.sender_id === user.userId ? null : (msg.sender_npub || null),
-        }];
+        const existingIndex = prev.findIndex(c => c.other_user_id === otherId);
+        const baseConversation = existingIndex >= 0
+          ? prev[existingIndex]
+          : {
+            other_user_id: otherId,
+            other_username: fallbackUsername || otherId,
+            other_avatar_color: fallbackAvatarColor || '#40FF40',
+            other_npub: fallbackNpub || null,
+          };
+
+        const nextConversation = mergeDMConversationMeta(baseConversation, {
+          username: fallbackUsername,
+          avatarColor: fallbackAvatarColor,
+          npub: fallbackNpub,
+        });
+
+        if (existingIndex >= 0) {
+          if (nextConversation === baseConversation) return prev;
+          const next = [...prev];
+          next[existingIndex] = nextConversation;
+          return next;
+        }
+
+        return [...prev, nextConversation];
       });
     };
 
     socket.on('dm:message', handleDM);
     return () => socket.off('dm:message', handleDM);
-  }, [socket, user]);
+  }, [mergeDMConversationMeta, socket, user]);
 
   const handleSelectDMUser = (u) => {
     if (u.npub) {
@@ -179,22 +291,40 @@ export default function Sidebar({ rooms, myRooms, createRoom, joinRoom, renameRo
         alignItems: 'center',
         gap: 10,
       }}>
-        <div onClick={onSelectNostrProfile} style={{ cursor: 'pointer', flexShrink: 0 }} title="Nostr profile">
-          <Avatar username={user.username} color={user.avatarColor} size={28} profilePicture={user.profilePicture} />
-        </div>
-        <div style={{ flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', gap: 6 }}>
-          <div className="truncate" style={{ fontWeight: 500, fontSize: 13, color: 'var(--text-primary)' }}>
-            {user.username}
+        <button
+          type="button"
+          onClick={onSelectNostrProfile}
+          title="Open profile"
+          style={{
+            flex: 1,
+            minWidth: 0,
+            display: 'flex',
+            alignItems: 'center',
+            gap: 10,
+            background: 'none',
+            border: 'none',
+            padding: 0,
+            cursor: 'pointer',
+            textAlign: 'left',
+          }}
+        >
+          <div style={{ flexShrink: 0 }}>
+            <Avatar username={user.username} color={user.avatarColor} size={28} profilePicture={user.profilePicture} />
           </div>
-          <div style={{
-            width: 5,
-            height: 5,
-            borderRadius: '50%',
-            background: connected ? 'var(--success)' : 'var(--danger)',
-            boxShadow: connected ? '0 0 6px rgba(0, 214, 143, 0.4)' : 'none',
-            flexShrink: 0,
-          }} />
-        </div>
+          <div style={{ minWidth: 0, display: 'flex', alignItems: 'center', gap: 6 }}>
+            <div className="truncate" style={{ fontWeight: 500, fontSize: 13, color: 'var(--text-primary)' }}>
+              {user.username}
+            </div>
+            <div style={{
+              width: 5,
+              height: 5,
+              borderRadius: '50%',
+              background: connected ? 'var(--success)' : 'var(--danger)',
+              boxShadow: connected ? '0 0 6px rgba(0, 214, 143, 0.4)' : 'none',
+              flexShrink: 0,
+            }} />
+          </div>
+        </button>
         <button
           onClick={logout}
           title="Log out"
@@ -263,7 +393,7 @@ export default function Sidebar({ rooms, myRooms, createRoom, joinRoom, renameRo
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="8.5" cy="7" r="4"/><line x1="20" y1="8" x2="20" y2="14"/><line x1="23" y1="11" x2="17" y2="11"/></svg>
           </button>
           <button
-            onClick={() => setShowGuildSettings(true)}
+            onClick={openGuildSettings}
             title="Guild settings"
             style={{
               background: 'none', border: 'none', color: 'var(--text-muted)',
@@ -322,7 +452,7 @@ export default function Sidebar({ rooms, myRooms, createRoom, joinRoom, renameRo
         <div style={{ marginBottom: 16 }}>
           {sectionHeader('Voice',
             <>
-              {iconBtn(() => setShowAudioSettings(true), 'Audio settings', gearIcon)}
+              {iconBtn(openAudioSettings, 'Audio settings', gearIcon)}
               {iconBtn(() => setShowCreateVoice(true), 'Create voice channel', plusIcon)}
             </>
           )}
@@ -533,10 +663,10 @@ export default function Sidebar({ rooms, myRooms, createRoom, joinRoom, renameRo
         <CreateVoiceChannelModal onClose={() => setShowCreateVoice(false)} onCreate={createVoiceChannel} />
       )}
       {showAudioSettings && (
-        <AudioSettings onClose={() => setShowAudioSettings(false)} />
+        <AudioSettings onClose={closeAudioSettings} openTraceId={audioSettingsOpenTraceId} />
       )}
       {showGuildSettings && (
-        <GuildSettingsModal onClose={() => setShowGuildSettings(false)} />
+        <GuildSettingsModal onClose={closeGuildSettings} openTraceId={guildSettingsOpenTraceId} />
       )}
       {showInviteGuild && (
         <InviteGuildModal onClose={() => setShowInviteGuild(false)} />
@@ -562,4 +692,4 @@ export default function Sidebar({ rooms, myRooms, createRoom, joinRoom, renameRo
   );
 }
 
-
+export default memo(Sidebar);

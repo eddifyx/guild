@@ -5,8 +5,11 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "nodemon src/index.js",
+    "dev:empty": "SEED_DEFAULT_GUILD=0 DB_PATH=./data/messenger-dev-empty.db nodemon src/index.js",
     "predev": "node scripts/ensureBetterSqlite3.js",
-    "prestart": "node scripts/ensureBetterSqlite3.js"
+    "prestart": "node scripts/ensureBetterSqlite3.js",
+    "reset:guilds": "node scripts/resetGuilds.js",
+    "reset:guilds:empty": "SEED_DEFAULT_GUILD=0 DB_PATH=./data/messenger-dev-empty.db node scripts/resetGuilds.js"
   },
   "dependencies": {
     "@noble/curves": "^1.9.7",

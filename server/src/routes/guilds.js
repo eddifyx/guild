@@ -16,6 +16,7 @@ const {
   getGuildMemberCount, deleteGuildMembers, deleteGuildRanks,
   getRoomsByGuild, getVoiceChannelsByGuild,
   deleteRoomAttachments, deleteRoomMessages, deleteRoomMembers, deleteRoomRow,
+  deleteSenderKeyDistributionsForRoom,
   clearChannelVoiceSessions, deleteVoiceChannel,
   DEFAULT_RANK_PERMISSIONS,
 } = require('../db');
@@ -245,11 +246,6 @@ router.delete('/:id', (req, res) => {
     return res.status(403).json({ error: 'Only the Guild Master can disband the guild' });
   }
 
-  // Prevent deleting the default guild
-  if (req.params.id === 'guild-byzantine-default') {
-    return res.status(403).json({ error: 'Cannot delete the default guild' });
-  }
-
   const memberIds = getGuildMembers.all(req.params.id).map((member) => member.id);
   const disbandGuild = db.transaction((guildId) => {
     // Delete all rooms and their data
@@ -257,6 +253,7 @@ router.delete('/:id', (req, res) => {
     for (const room of rooms) {
       deleteRoomAttachments.run(room.id);
       deleteRoomMessages.run(room.id);
+      deleteSenderKeyDistributionsForRoom.run(room.id);
       deleteRoomMembers.run(room.id);
       deleteRoomRow.run(room.id);
     }

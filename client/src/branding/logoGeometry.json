@@ -1,0 +1,11 @@
+{
+  "baseSize": 130,
+  "outerStroke": 2.7,
+  "middleStroke": 1.1,
+  "middleInset": 21,
+  "innerInset": 39,
+  "coreCut": 0,
+  "depth": 0,
+  "tilt": 5,
+  "motion": "lock"
+}

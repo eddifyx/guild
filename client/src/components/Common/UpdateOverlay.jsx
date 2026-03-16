@@ -1,10 +1,38 @@
 import { useState, useEffect } from 'react';
+import logoGeometry from '../../branding/logoGeometry.json';
 
-export default function UpdateOverlay({ serverUrl, onDismiss }) {
+const LOGO_SIZE = 120;
+const LOGO_SCALE = LOGO_SIZE / logoGeometry.baseSize;
+const OUTER_STROKE = roundToTenth(logoGeometry.outerStroke * LOGO_SCALE);
+const MIDDLE_STROKE = roundToTenth(logoGeometry.middleStroke * LOGO_SCALE);
+const MIDDLE_INSET = roundToTenth(logoGeometry.middleInset * LOGO_SCALE);
+const INNER_INSET = roundToTenth(logoGeometry.innerInset * LOGO_SCALE);
+const LOGO_TILT = logoGeometry.tilt;
+
+function roundToTenth(value) {
+  return Math.round(value * 10) / 10;
+}
+
+export default function UpdateOverlay({ serverUrl, onDismiss, updateInfo = null }) {
   const [progress, setProgress] = useState({ phase: 'downloading', downloadedBytes: 0, totalBytes: 0 });
   const [error, setError] = useState(null);
+  const isManualInstall = updateInfo?.updateStrategy === 'manual-install';
+  const primaryDownloadUrl = updateInfo?.platformDownload?.installerUrl
+    || updateInfo?.platformDownload?.archiveUrl
+    || updateInfo?.downloadPageUrl
+    || null;
+  const secondaryDownloadUrl = updateInfo?.downloadPageUrl || null;
+
+  const openExternal = (url) => {
+    if (!url) return;
+    window.electronAPI?.openExternal?.(url);
+  };
 
   useEffect(() => {
+    if (isManualInstall) {
+      return undefined;
+    }
+
     const cleanup = window.electronAPI?.onUpdateProgress?.((data) => {
       setProgress(data);
     });
@@ -19,7 +47,7 @@ export default function UpdateOverlay({ serverUrl, onDismiss }) {
     })();
 
     return () => cleanup?.();
-  }, [serverUrl]);
+  }, [serverUrl, isManualInstall]);
 
   const formatBytes = (bytes) => {
     if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(0) + ' KB';
@@ -72,56 +100,152 @@ export default function UpdateOverlay({ serverUrl, onDismiss }) {
         gap: 32,
       }}>
         {/* Animated /guild diamond logo */}
-        <div style={{ position: 'relative', width: 120, height: 120 }}>
-          {/* Outer diamond — spins clockwise */}
+        <div style={{ position: 'relative', width: LOGO_SIZE, height: LOGO_SIZE, perspective: 960 }}>
           <div style={{
             position: 'absolute',
-            top: 10, left: 10,
-            width: 100, height: 100,
-            border: '2px solid rgba(64, 255, 64, 0.4)',
-            borderRadius: 4,
-            animation: 'byz-spin-cw 4s linear infinite',
+            inset: 0,
+            transform: `rotateX(${LOGO_TILT}deg) rotateY(${(LOGO_TILT * -1.15).toFixed(2)}deg)`,
+            transformStyle: 'preserve-3d',
             willChange: 'transform',
-          }} />
-          {/* Middle diamond — spins counter-clockwise */}
-          <div style={{
-            position: 'absolute',
-            top: 25, left: 25,
-            width: 70, height: 70,
-            border: '2px solid rgba(64, 255, 64, 0.6)',
-            borderRadius: 3,
-            animation: 'byz-spin-ccw 3s linear infinite',
-            willChange: 'transform',
-          }} />
-          {/* Inner diamond — pulses */}
-          <div style={{
-            position: 'absolute',
-            top: 42, left: 42,
-            width: 36, height: 36,
-            background: 'rgba(64, 255, 64, 0.8)',
-            borderRadius: 2,
-            animation: 'byz-pulse 2s ease-in-out infinite',
-            willChange: 'transform',
-          }} />
+          }}>
+            {/* Outer diamond — spins clockwise */}
+            <div style={{
+              position: 'absolute',
+              inset: 0,
+              border: `${OUTER_STROKE}px solid rgba(64, 255, 64, 0.4)`,
+              borderRadius: 4,
+              animation: 'byz-spin-cw 4s linear infinite',
+              willChange: 'transform',
+            }} />
+            {/* Middle diamond — spins counter-clockwise */}
+            <div style={{
+              position: 'absolute',
+              inset: MIDDLE_INSET,
+              border: `${MIDDLE_STROKE}px solid rgba(64, 255, 64, 0.58)`,
+              borderRadius: 3,
+              animation: 'byz-spin-ccw 3s linear infinite',
+              willChange: 'transform',
+            }} />
+            {/* Inner diamond — pulses */}
+            <div style={{
+              position: 'absolute',
+              inset: INNER_INSET,
+              background: 'rgba(64, 255, 64, 0.8)',
+              borderRadius: 2,
+              boxShadow: '0 0 16px rgba(64, 255, 64, 0.2)',
+              animation: 'byz-pulse 2s ease-in-out infinite',
+              willChange: 'transform',
+            }} />
+          </div>
         </div>
 
         {error ? (
           <>
             <div style={{ color: '#e94560', fontSize: 14, fontWeight: 500 }}>{error}</div>
-            <button
-              onClick={onDismiss}
-              style={{
-                background: 'rgba(233, 69, 96, 0.15)',
-                border: '1px solid rgba(233, 69, 96, 0.3)',
-                color: '#e94560',
-                padding: '8px 24px',
-                borderRadius: 6,
-                cursor: 'pointer',
-                fontSize: 13,
-              }}
-            >
-              Dismiss
-            </button>
+            <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', justifyContent: 'center' }}>
+              {primaryDownloadUrl && (
+                <button
+                  onClick={() => openExternal(primaryDownloadUrl)}
+                  style={{
+                    background: 'rgba(64, 255, 64, 0.12)',
+                    border: '1px solid rgba(64, 255, 64, 0.26)',
+                    color: '#40FF40',
+                    padding: '8px 24px',
+                    borderRadius: 6,
+                    cursor: 'pointer',
+                    fontSize: 13,
+                  }}
+                >
+                  Download latest build
+                </button>
+              )}
+              <button
+                onClick={onDismiss}
+                style={{
+                  background: 'rgba(233, 69, 96, 0.15)',
+                  border: '1px solid rgba(233, 69, 96, 0.3)',
+                  color: '#e94560',
+                  padding: '8px 24px',
+                  borderRadius: 6,
+                  cursor: 'pointer',
+                  fontSize: 13,
+                }}
+              >
+                Dismiss
+              </button>
+            </div>
+          </>
+        ) : isManualInstall ? (
+          <>
+            <div style={{
+              color: '#40FF40',
+              fontSize: 18,
+              fontWeight: 600,
+              letterSpacing: 0.4,
+              textAlign: 'center',
+            }}>
+              Install this release directly
+            </div>
+            <div style={{
+              maxWidth: 480,
+              color: 'rgba(231, 239, 231, 0.78)',
+              fontSize: 14,
+              lineHeight: 1.55,
+              textAlign: 'center',
+            }}>
+              {updateInfo?.manualInstallReason || 'This update should be installed from a direct download for the moment.'}
+              {' '}Download the latest build, open it, and replace the existing app.
+            </div>
+            <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', justifyContent: 'center' }}>
+              {primaryDownloadUrl && (
+                <button
+                  onClick={() => openExternal(primaryDownloadUrl)}
+                  style={{
+                    background: 'rgba(64, 255, 64, 0.12)',
+                    border: '1px solid rgba(64, 255, 64, 0.26)',
+                    color: '#40FF40',
+                    padding: '10px 24px',
+                    borderRadius: 8,
+                    cursor: 'pointer',
+                    fontSize: 13,
+                    fontWeight: 600,
+                  }}
+                >
+                  Download for this device
+                </button>
+              )}
+              {secondaryDownloadUrl && secondaryDownloadUrl !== primaryDownloadUrl && (
+                <button
+                  onClick={() => openExternal(secondaryDownloadUrl)}
+                  style={{
+                    background: 'rgba(255, 255, 255, 0.06)',
+                    border: '1px solid rgba(255, 255, 255, 0.12)',
+                    color: 'rgba(231, 239, 231, 0.9)',
+                    padding: '10px 24px',
+                    borderRadius: 8,
+                    cursor: 'pointer',
+                    fontSize: 13,
+                    fontWeight: 600,
+                  }}
+                >
+                  View all downloads
+                </button>
+              )}
+              <button
+                onClick={onDismiss}
+                style={{
+                  background: 'transparent',
+                  border: '1px solid rgba(255, 255, 255, 0.12)',
+                  color: 'rgba(231, 239, 231, 0.7)',
+                  padding: '10px 24px',
+                  borderRadius: 8,
+                  cursor: 'pointer',
+                  fontSize: 13,
+                }}
+              >
+                Dismiss
+              </button>
+            </div>
           </>
         ) : (
           <>

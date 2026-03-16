@@ -345,7 +345,14 @@ export async function groupEncrypt(roomId, plaintext) {
 }
 
 export async function groupDecrypt(senderId, roomId, payload) {
-  return window.signalCrypto.groupDecrypt(senderId, roomId, payload);
+  const result = await window.signalCrypto.groupDecrypt(senderId, roomId, payload);
+  if (result?.ok === false) {
+    const err = new Error(result?.error?.message || 'Group decrypt failed');
+    if (result?.error?.code !== undefined) err.code = result.error.code;
+    if (result?.error?.operation) err.operation = result.error.operation;
+    throw err;
+  }
+  return result?.plaintext ?? result;
 }
 
 export async function rekeyRoom(roomId) {
@@ -392,6 +399,5 @@ async function checkAndReplenishKyber() {
     console.error('[Signal] Kyber replenishment failed:', err);
   }
 }
-
 
 

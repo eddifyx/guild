@@ -7,6 +7,7 @@ const dataDir = path.dirname(dbPath);
 if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
 
 const db = new Database(dbPath);
+const SHOULD_SEED_DEFAULT_GUILD = process.env.SEED_DEFAULT_GUILD === '1' || process.env.SEED_DEFAULT_GUILD === 'true';
 
 db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
@@ -23,9 +24,11 @@ function initTables() {
 
     CREATE TABLE IF NOT EXISTS rooms (
       id TEXT PRIMARY KEY,
-      name TEXT NOT NULL UNIQUE,
+      name TEXT NOT NULL,
+      guild_id TEXT REFERENCES guilds(id),
       created_by TEXT NOT NULL REFERENCES users(id),
-      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(guild_id, name)
     );
 
     CREATE TABLE IF NOT EXISTS room_members (
@@ -84,9 +87,11 @@ function initTables() {
 
     CREATE TABLE IF NOT EXISTS voice_channels (
       id TEXT PRIMARY KEY,
-      name TEXT NOT NULL UNIQUE,
+      name TEXT NOT NULL,
+      guild_id TEXT REFERENCES guilds(id),
       created_by TEXT NOT NULL REFERENCES users(id),
-      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(guild_id, name)
     );
 
     CREATE TABLE IF NOT EXISTS voice_sessions (
@@ -231,6 +236,22 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_kyber_available ON kyber_prekeys(user_id, used);
 
+  CREATE TABLE IF NOT EXISTS sender_key_distributions (
+    id TEXT PRIMARY KEY,
+    room_id TEXT NOT NULL REFERENCES rooms(id),
+    sender_user_id TEXT NOT NULL REFERENCES users(id),
+    recipient_user_id TEXT NOT NULL REFERENCES users(id),
+    distribution_id TEXT NOT NULL,
+    envelope TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    delivered_at TEXT,
+    UNIQUE (room_id, sender_user_id, recipient_user_id, distribution_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_skd_recipient_room_pending
+    ON sender_key_distributions(recipient_user_id, room_id, delivered_at, created_at);
+  CREATE INDEX IF NOT EXISTS idx_skd_room_sender_distribution
+    ON sender_key_distributions(room_id, sender_user_id, distribution_id);
+
   CREATE TABLE IF NOT EXISTS sessions (
     token TEXT PRIMARY KEY,
     user_id TEXT NOT NULL REFERENCES users(id),
@@ -276,6 +297,7 @@ db.exec(`
     rank_id TEXT NOT NULL REFERENCES guild_ranks(id),
     public_note TEXT DEFAULT '',
     officer_note TEXT DEFAULT '',
+    permission_overrides TEXT DEFAULT '',
     joined_at TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (guild_id, user_id)
   );
@@ -454,8 +476,8 @@ db.exec(`
   }
 }
 
-// Seed default General room and voice channel on first run
-{
+// Seed default General room and voice channel on first run unless explicitly disabled.
+if (SHOULD_SEED_DEFAULT_GUILD) {
   const hasRooms = db.prepare('SELECT COUNT(*) as count FROM rooms').get();
   if (hasRooms.count === 0) {
     const sysId = 'system-00000000-0000-0000-0000-000000000000';
@@ -526,6 +548,7 @@ const getUserByNpub = db.prepare('SELECT * FROM users WHERE npub = ?');
 const createUserWithNpub = db.prepare(
   'INSERT INTO users (id, username, avatar_color, npub, lud16, profile_picture) VALUES (?, ?, ?, ?, ?, ?)'
 );
+const updateUserUsername = db.prepare('UPDATE users SET username = ? WHERE id = ?');
 const updateUserLud16 = db.prepare('UPDATE users SET lud16 = ? WHERE id = ?');
 const updateUserProfilePicture = db.prepare('UPDATE users SET profile_picture = ? WHERE id = ?');
 const updateUserStatus = db.prepare('UPDATE users SET custom_status = ? WHERE id = ?');
@@ -548,6 +571,7 @@ const getUserRooms = db.prepare(`
   WHERE rm.user_id = ? ORDER BY r.created_at
 `);
 const isRoomMember = db.prepare('SELECT 1 FROM room_members WHERE room_id = ? AND user_id = ?');
+const getRoomMembership = db.prepare('SELECT * FROM room_members WHERE room_id = ? AND user_id = ?');
 const renameRoom = db.prepare('UPDATE rooms SET name = ? WHERE id = ?');
 const deleteRoomRow = db.prepare('DELETE FROM rooms WHERE id = ?');
 const deleteRoomMembers = db.prepare('DELETE FROM room_members WHERE room_id = ?');
@@ -606,21 +630,24 @@ const deleteMessage = db.prepare('DELETE FROM messages WHERE id = ? AND sender_i
 const deleteMessageAttachments = db.prepare('DELETE FROM attachments WHERE message_id = ?');
 const getMessageAttachments = db.prepare('SELECT * FROM attachments WHERE message_id = ?');
 
-function getRoomMessages(roomId, before, limit = 50) {
+function getRoomMessages(roomId, userId, before, limit = 50) {
+  const membership = getRoomMembership.get(roomId, userId);
+  if (!membership) return [];
+
   if (before) {
     return db.prepare(`
       SELECT m.*, u.username as sender_name, u.avatar_color as sender_color, u.npub as sender_npub, u.profile_picture as sender_picture
       FROM messages m JOIN users u ON m.sender_id = u.id
-      WHERE m.room_id = ? AND m.created_at < ?
+      WHERE m.room_id = ? AND m.created_at >= ? AND m.created_at < ?
       ORDER BY m.created_at DESC LIMIT ?
-    `).all(roomId, before, limit).reverse();
+    `).all(roomId, membership.joined_at, before, limit).reverse();
   }
   return db.prepare(`
     SELECT m.*, u.username as sender_name, u.avatar_color as sender_color, u.npub as sender_npub, u.profile_picture as sender_picture
     FROM messages m JOIN users u ON m.sender_id = u.id
-    WHERE m.room_id = ?
+    WHERE m.room_id = ? AND m.created_at >= ?
     ORDER BY m.created_at DESC LIMIT ?
-  `).all(roomId, limit).reverse();
+  `).all(roomId, membership.joined_at, limit).reverse();
 }
 
 function getDMMessages(userAId, userBId, before, limit = 50) {
@@ -783,6 +810,57 @@ const getAndClaimKyberPreKey = db.transaction((userId) => {
 const countAvailableKyberPreKeys = db.prepare(
   'SELECT COUNT(*) as count FROM kyber_prekeys WHERE user_id = ? AND used = 0'
 );
+
+const upsertSenderKeyDistribution = db.prepare(
+  `INSERT INTO sender_key_distributions (
+      id,
+      room_id,
+      sender_user_id,
+      recipient_user_id,
+      distribution_id,
+      envelope
+    ) VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(room_id, sender_user_id, recipient_user_id, distribution_id) DO UPDATE SET
+      id = excluded.id,
+      envelope = excluded.envelope,
+      created_at = datetime('now'),
+      delivered_at = NULL`
+);
+const getPendingSenderKeyDistributionsForRecipientInRoom = db.prepare(`
+  SELECT skd.id,
+         skd.room_id,
+         skd.sender_user_id,
+         skd.distribution_id,
+         skd.envelope,
+         skd.created_at,
+         u.npub AS sender_npub
+  FROM sender_key_distributions skd
+  JOIN users u ON u.id = skd.sender_user_id
+  WHERE skd.recipient_user_id = ?
+    AND skd.room_id = ?
+    AND skd.delivered_at IS NULL
+  ORDER BY skd.created_at ASC
+`);
+const acknowledgeSenderKeyDistribution = db.prepare(
+  `UPDATE sender_key_distributions
+   SET delivered_at = COALESCE(delivered_at, datetime('now'))
+   WHERE id = ? AND recipient_user_id = ? AND room_id = ?`
+);
+const deleteSenderKeyDistributionsForRoom = db.prepare(
+  'DELETE FROM sender_key_distributions WHERE room_id = ?'
+);
+const deleteSenderKeyDistributionsForRecipientInRoom = db.prepare(
+  'DELETE FROM sender_key_distributions WHERE room_id = ? AND recipient_user_id = ?'
+);
+
+const acknowledgeSenderKeyDistributions = db.transaction((recipientUserId, roomId, ids) => {
+  let acknowledged = 0;
+  for (const id of ids) {
+    const result = acknowledgeSenderKeyDistribution.run(id, recipientUserId, roomId);
+    acknowledged += result.changes || 0;
+  }
+  return acknowledged;
+});
 
 // Reset all encryption keys for a user (for fresh client re-registration)
 const deleteUserIdentityKey = db.prepare('DELETE FROM identity_keys WHERE user_id = ?');
@@ -1135,6 +1213,7 @@ module.exports = {
   deleteAddon,
   getUserByNpub,
   createUserWithNpub,
+  updateUserUsername,
   updateUserLud16,
   updateUserProfilePicture,
   getMessageById,
@@ -1154,6 +1233,11 @@ module.exports = {
   insertKyberPreKey,
   getAndClaimKyberPreKey,
   countAvailableKyberPreKeys,
+  upsertSenderKeyDistribution,
+  getPendingSenderKeyDistributionsForRecipientInRoom,
+  acknowledgeSenderKeyDistributions,
+  deleteSenderKeyDistributionsForRoom,
+  deleteSenderKeyDistributionsForRecipientInRoom,
   createSession,
   getSession,
   deleteSession,

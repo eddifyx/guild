@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Restoring Logo Lab</title>
+  </head>
+  <body style="background:#050705;color:#edf6ee;font-family:ui-sans-serif,system-ui,sans-serif;display:grid;place-items:center;min-height:100vh;margin:0;">
+    <p>Restoring your saved screenshot state...</p>
+    <script>
+      const restoredState = {
+        outerStroke: 2.7,
+        middleStroke: 1.1,
+        middleInset: 21,
+        innerInset: 39,
+        coreCut: 0,
+        depth: 0,
+        tilt: 5,
+        motion: "lock",
+      };
+
+      try {
+        window.localStorage.setItem("guild-logo-lab-state-v1", JSON.stringify(restoredState));
+      } catch {}
+
+      window.location.replace("/logo-lab/");
+    </script>
+  </body>
+</html>

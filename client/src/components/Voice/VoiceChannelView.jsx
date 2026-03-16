@@ -1,5 +1,5 @@
 import { useMemo } from 'react';
-import { useVoiceContext } from '../../contexts/VoiceContext';
+import { useVoiceContext, useVoicePresenceContext } from '../../contexts/VoiceContext';
 import { useAuth } from '../../contexts/AuthContext';
 import { useOnlineUsers } from '../../hooks/useOnlineUsers';
 import Avatar from '../Common/Avatar';
@@ -115,7 +115,8 @@ const TIER_CONFIG = {
 const GRID_MIN_WIDTH = { large: 160, medium: 130, compact: 100 };
 
 export default function VoiceChannelView({ channelId }) {
-  const { voiceChannels, channelId: myChannelId, peers, speaking: selfSpeaking, voiceE2E, e2eWarning } = useVoiceContext();
+  const { voiceChannels, channelId: myChannelId, voiceE2E, e2eWarning } = useVoiceContext();
+  const { peers, speaking: selfSpeaking } = useVoicePresenceContext();
   const { user } = useAuth();
   const { onlineUsers } = useOnlineUsers();
 
@@ -131,6 +132,21 @@ export default function VoiceChannelView({ channelId }) {
 
   const count = participants.length;
   const tier = count <= 4 ? 'large' : count <= 12 ? 'medium' : 'compact';
+  const secureVoiceState = e2eWarning
+    ? 'blocked'
+    : voiceE2E
+      ? 'ready'
+      : 'establishing';
+  const secureVoiceColor = secureVoiceState === 'blocked'
+    ? 'var(--danger)'
+    : secureVoiceState === 'ready'
+      ? 'var(--success)'
+      : 'var(--accent)';
+  const secureVoiceLabel = secureVoiceState === 'blocked'
+    ? 'Secure Media Blocked'
+    : secureVoiceState === 'ready'
+      ? 'Secure Voice Connected'
+      : 'Establishing Secure Voice';
 
   function getParticipantState(p) {
     const isSelf = p.userId === user.userId;
@@ -187,17 +203,19 @@ export default function VoiceChannelView({ channelId }) {
         <div style={styles.statusLeft}>
           <div style={{
             ...styles.statusDot,
-            background: voiceE2E ? 'var(--success)' : 'var(--danger)',
-            boxShadow: voiceE2E
+            background: secureVoiceColor,
+            boxShadow: secureVoiceState === 'ready'
               ? '0 0 8px rgba(0, 214, 143, 0.4)'
-              : '0 0 8px rgba(255, 71, 87, 0.4)',
+              : secureVoiceState === 'blocked'
+                ? '0 0 8px rgba(255, 71, 87, 0.4)'
+                : '0 0 8px rgba(64, 255, 64, 0.25)',
           }} />
-          <span style={{ ...styles.statusText, color: voiceE2E ? 'var(--success)' : 'var(--danger)' }}>
-            {voiceE2E ? 'Secure Voice Connected' : 'Secure Media Blocked'}
+          <span style={{ ...styles.statusText, color: secureVoiceColor }}>
+            {secureVoiceLabel}
           </span>
           <span style={styles.statusChannel}>{channelName}</span>
         </div>
-        {voiceE2E ? (
+        {secureVoiceState === 'ready' ? (
           <div style={styles.e2eBadge}>
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
@@ -205,6 +223,8 @@ export default function VoiceChannelView({ channelId }) {
             </svg>
             E2E Encrypted
           </div>
+        ) : secureVoiceState === 'establishing' ? (
+          <div style={styles.pendingBadge}>Negotiating secure media</div>
         ) : (
           <div style={styles.blockedBadge}>Secure media unavailable</div>
         )}
@@ -297,5 +317,10 @@ const styles = {
     fontSize: 11,
     fontWeight: 600,
     color: 'var(--danger)',
+  },
+  pendingBadge: {
+    fontSize: 11,
+    fontWeight: 600,
+    color: 'var(--accent)',
   },
 };

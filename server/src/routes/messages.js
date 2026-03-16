@@ -18,7 +18,7 @@ router.get('/room/:roomId', auth, (req, res) => {
   if (!member) return res.status(403).json({ error: 'Not a member of this room' });
   const { before } = req.query;
   const limit = Math.min(parseInt(req.query.limit) || 50, 100);
-  const messages = getRoomMessages(req.params.roomId, before, limit);
+  const messages = getRoomMessages(req.params.roomId, req.userId, before, limit);
   res.json(attachFiles(messages));
 });
 

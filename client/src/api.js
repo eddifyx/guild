@@ -1,6 +1,9 @@
 /**
  * Returns true if a URL is a local/dev address (localhost, 127.0.0.1, 192.168.x.x, 10.x.x.x).
  */
+const PACKAGED_DEFAULT_SERVER_URL = (import.meta.env.VITE_DEFAULT_SERVER_URL || 'https://guild.app').replace(/\/+$/, '');
+const DEV_DEFAULT_SERVER_URL = 'http://localhost:3001';
+
 function isLocalUrl(url) {
   if (!url) return false;
   return /^https?:\/\/(localhost|127\.0\.0\.1|192\.168\.\d+\.\d+|10\.\d+\.\d+\.\d+)(:\d+)?/i.test(url);
@@ -28,7 +31,32 @@ export function setServerUrl(url) {
 }
 
 export function getServerUrl() {
-  return localStorage.getItem('serverUrl') || 'http://localhost:3001';
+  const stored = localStorage.getItem('serverUrl');
+  if (stored) return stored;
+  return import.meta.env.DEV ? DEV_DEFAULT_SERVER_URL : PACKAGED_DEFAULT_SERVER_URL;
+}
+
+function toAbsoluteServerUrl(url, serverUrl = getServerUrl()) {
+  if (!url) return null;
+  if (/^https?:\/\//i.test(url)) return url;
+  if (url.startsWith('/')) return `${serverUrl}${url}`;
+  return `${serverUrl}/${url.replace(/^\/+/, '')}`;
+}
+
+function isNetworkFetchError(error) {
+  const message = String(error?.message || '').toLowerCase();
+  return error?.name === 'TypeError'
+    || message === 'failed to fetch'
+    || message.includes('networkerror')
+    || message.includes('load failed');
+}
+
+export function toServerConnectionError(error, serverUrl = getServerUrl()) {
+  if (!isNetworkFetchError(error)) {
+    return error instanceof Error ? error : new Error(String(error || 'Request failed'));
+  }
+
+  return new Error(`Cannot reach the /guild server at ${serverUrl}. Make sure it is running, then try again.`);
 }
 
 function getAuth() {
@@ -109,13 +137,18 @@ export function getFileUrl(filePath) {
  * Authenticated API call — includes Bearer token from stored auth.
  */
 export async function api(path, options = {}) {
-  const res = await fetch(`${getServerUrl()}${path}`, {
-    ...options,
-    headers: getAuthHeaders({
-      'Content-Type': 'application/json',
-      ...options.headers,
-    }),
-  });
+  let res;
+  try {
+    res = await fetch(`${getServerUrl()}${path}`, {
+      ...options,
+      headers: getAuthHeaders({
+        'Content-Type': 'application/json',
+        ...options.headers,
+      }),
+    });
+  } catch (error) {
+    throw toServerConnectionError(error);
+  }
   if (!res.ok) {
     handleSessionExpiry(res.status);
     const err = await res.json().catch(() => ({ error: res.statusText }));
@@ -129,13 +162,18 @@ export async function api(path, options = {}) {
  * Unauthenticated API call — for challenge and login endpoints.
  */
 export async function apiNoAuth(path, options = {}) {
-  const res = await fetch(`${getServerUrl()}${path}`, {
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
+  let res;
+  try {
+    res = await fetch(`${getServerUrl()}${path}`, {
+      ...options,
+      headers: {
+        'Content-Type': 'application/json',
+        ...options.headers,
+      },
+    });
+  } catch (error) {
+    throw toServerConnectionError(error);
+  }
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: res.statusText }));
     throw new Error(err.error || 'Request failed');
@@ -144,11 +182,16 @@ export async function apiNoAuth(path, options = {}) {
 }
 
 export async function uploadFile(file) {
-  const res = await fetch(`${getServerUrl()}/api/upload`, {
-    method: 'POST',
-    headers: getAuthHeaders(),
-    body: (() => { const fd = new FormData(); fd.append('file', file); return fd; })(),
-  });
+  let res;
+  try {
+    res = await fetch(`${getServerUrl()}/api/upload`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: (() => { const fd = new FormData(); fd.append('file', file); return fd; })(),
+    });
+  } catch (error) {
+    throw toServerConnectionError(error);
+  }
   if (!res.ok) {
     handleSessionExpiry(res.status);
     const err = await res.json().catch(() => ({ error: res.statusText }));
@@ -161,17 +204,51 @@ export async function checkLatestVersion() {
   try {
     const localVersion = await window.electronAPI?.getAppVersion?.() || '0.0.0';
     const platform = window.electronAPI?.getPlatform?.() || process.platform || 'unknown';
-    const res = await fetch(`${getServerUrl()}/api/version?platform=${platform}`);
-    if (!res.ok) return { hasUpdate: false, localVersion, remoteVersion: null };
-    const { version: remoteVersion } = await res.json();
+    const serverUrl = getServerUrl();
+    const res = await fetch(`${serverUrl}/api/version?platform=${platform}&localVersion=${encodeURIComponent(localVersion)}`);
+    if (!res.ok) {
+      return {
+        hasUpdate: false,
+        localVersion,
+        remoteVersion: null,
+        updateStrategy: 'native',
+        downloadPageUrl: null,
+        platformDownload: null,
+      };
+    }
+    const payload = await res.json();
+    const { version: remoteVersion } = payload;
     const local = localVersion.split('.').map(Number);
     const remote = remoteVersion.split('.').map(Number);
     const hasUpdate = remote[0] > local[0]
       || (remote[0] === local[0] && remote[1] > local[1])
       || (remote[0] === local[0] && remote[1] === local[1] && remote[2] > local[2]);
-    return { hasUpdate, localVersion, remoteVersion };
+    const rawPlatformDownload = payload?.downloads?.[platform] || null;
+    const platformDownload = rawPlatformDownload ? {
+      ...rawPlatformDownload,
+      installerUrl: toAbsoluteServerUrl(rawPlatformDownload.installerUrl, serverUrl),
+      archiveUrl: toAbsoluteServerUrl(rawPlatformDownload.archiveUrl, serverUrl),
+    } : null;
+
+    return {
+      hasUpdate,
+      localVersion,
+      remoteVersion,
+      updateStrategy: payload?.updateStrategy || 'native',
+      manualInstallReason: payload?.manualInstallReason || null,
+      downloadPageUrl: toAbsoluteServerUrl(payload?.downloadPageUrl, serverUrl),
+      platformDownload,
+    };
   } catch {
-    return { hasUpdate: false, localVersion: null, remoteVersion: null };
+    return {
+      hasUpdate: false,
+      localVersion: null,
+      remoteVersion: null,
+      updateStrategy: 'native',
+      manualInstallReason: null,
+      downloadPageUrl: null,
+      platformDownload: null,
+    };
   }
 }
 
@@ -268,11 +345,16 @@ export async function uploadEncryptedFile(encryptedBlob, filename) {
   const formData = new FormData();
   formData.append('file', encryptedBlob, filename);
   formData.append('scope', 'chat-attachment');
-  const res = await fetch(`${getServerUrl()}/api/upload`, {
-    method: 'POST',
-    headers: getAuthHeaders(),
-    body: formData,
-  });
+  let res;
+  try {
+    res = await fetch(`${getServerUrl()}/api/upload`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: formData,
+    });
+  } catch (error) {
+    throw toServerConnectionError(error);
+  }
   if (!res.ok) {
     handleSessionExpiry(res.status);
     const err = await res.json().catch(() => ({ error: res.statusText }));

@@ -85,7 +85,7 @@ export default function MessageBubble({ message, isOwn, showHeader, prevSameSend
             <span style={{
               fontWeight: 600,
               fontSize: 13,
-              color: message.sender_npub ? '#b388ff' : 'var(--accent)',
+              color: 'var(--text-primary)',
             }}>
               {message.sender_name}
             </span>
@@ -124,7 +124,29 @@ export default function MessageBubble({ message, isOwn, showHeader, prevSameSend
           </div>
         ) : (
           <>
-            {message._decryptionFailed ? (
+            {message._decryptionPending ? (
+              <div style={{
+                fontSize: 13,
+                lineHeight: 1.55,
+                color: 'var(--text-muted)',
+                fontStyle: 'italic',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 4,
+              }}>
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M12 2v4" />
+                  <path d="m16.2 7.8 2.9-2.9" />
+                  <path d="M18 12h4" />
+                  <path d="m16.2 16.2 2.9 2.9" />
+                  <path d="M12 18v4" />
+                  <path d="m4.9 19.1 2.9-2.9" />
+                  <path d="M2 12h4" />
+                  <path d="m4.9 4.9 2.9 2.9" />
+                </svg>
+                Unlocking secure message...
+              </div>
+            ) : message._decryptionFailed ? (
               <div style={{
                 fontSize: 13,
                 lineHeight: 1.55,

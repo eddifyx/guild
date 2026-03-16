@@ -1,0 +1,1004 @@
+From dc73ddc2924a40cf535254b8b258c30d820a7569 Mon Sep 17 00:00:00 2001
+From: eddifyx <eddifyx@pm.me>
+Date: Sun, 15 Mar 2026 18:00:45 -0700
+Subject: [PATCH] Fix Windows desktop packaging
+
+---
+ client/electron/crypto/runtimeModules.js    |  51 +++
+ client/electron/crypto/signalBridge.js      |  15 +-
+ client/electron/crypto/signalStore.js       |  33 +-
+ client/electron/crypto/signalStoreMemory.js | 446 ++++++++++++++++++++
+ client/forge.config.js                      | 106 +++--
+ docs/WINDOWS-BUILD.md                       | 203 +++++++++
+ 6 files changed, 804 insertions(+), 50 deletions(-)
+ create mode 100644 client/electron/crypto/runtimeModules.js
+ create mode 100644 client/electron/crypto/signalStoreMemory.js
+ create mode 100644 docs/WINDOWS-BUILD.md
+
+diff --git a/client/electron/crypto/runtimeModules.js b/client/electron/crypto/runtimeModules.js
+new file mode 100644
+index 0000000..d0167c4
+--- /dev/null
++++ b/client/electron/crypto/runtimeModules.js
+@@ -0,0 +1,51 @@
++const path = require('path');
++const { pathToFileURL } = require('url');
++
++function getVendorNodeModulesPath() {
++  return path.join(process.resourcesPath, 'vendor', 'node_modules');
++}
++
++function requireRuntimeModule(packageName) {
++  try {
++    return require(packageName);
++  } catch (error) {
++    if (!process.resourcesPath) {
++      throw error;
++    }
++
++    const packagedModulePath = path.join(getVendorNodeModulesPath(), ...packageName.split('/'));
++    return require(packagedModulePath);
++  }
++}
++
++function resolveRuntimePackageRoot(packageName) {
++  try {
++    return path.dirname(require.resolve(`${packageName}/package.json`));
++  } catch (error) {
++    if (!process.resourcesPath) {
++      throw error;
++    }
++
++    return path.join(getVendorNodeModulesPath(), ...packageName.split('/'));
++  }
++}
++
++async function importLibsignalModule() {
++  const libsignalRoot = resolveRuntimePackageRoot('@signalapp/libsignal-client');
++  const originalCwd = process.cwd();
++
++  process.chdir(libsignalRoot);
++  try {
++    const entryUrl = pathToFileURL(path.join(libsignalRoot, 'dist', 'index.js')).href;
++    return await import(entryUrl);
++  } finally {
++    process.chdir(originalCwd);
++  }
++}
++
++module.exports = {
++  getVendorNodeModulesPath,
++  importLibsignalModule,
++  requireRuntimeModule,
++  resolveRuntimePackageRoot,
++};
+diff --git a/client/electron/crypto/signalBridge.js b/client/electron/crypto/signalBridge.js
+index a307f5c..3f0a76b 100644
+--- a/client/electron/crypto/signalBridge.js
++++ b/client/electron/crypto/signalBridge.js
+@@ -13,18 +13,12 @@ const crypto = require('crypto');
+ const fs = require('fs');
+ const path = require('path');
+ const { createProtocolStore } = require('./signalStore');
++const { importLibsignalModule } = require('./runtimeModules');
+ let signalModulePromise = null;
+ 
+ async function getSignalModule() {
+   if (!signalModulePromise) {
+-    const originalCwd = process.cwd();
+-    const libsignalPackageJson = require.resolve('@signalapp/libsignal-client/package.json');
+-    const libsignalRoot = path.dirname(libsignalPackageJson);
+-
+-    process.chdir(libsignalRoot);
+-    signalModulePromise = import('@signalapp/libsignal-client').finally(() => {
+-      process.chdir(originalCwd);
+-    });
++    signalModulePromise = importLibsignalModule();
+   }
+ 
+   return signalModulePromise;
+@@ -348,8 +342,8 @@ function registerSignalHandlers(ipcMain) {
+   ipcMain.handle('signal:delete-session', async (_event, recipientId) => {
+     if (!store) return;
+     const { ProtocolAddress } = await getSignalModule();
+-    const addr = ProtocolAddress.new(recipientId, DEVICE_ID).toString();
+-    store._db.prepare('DELETE FROM sessions WHERE address = ?').run(addr);
++    const address = ProtocolAddress.new(recipientId, DEVICE_ID);
++    await store.removeSession(address);
+   });
+ 
+   // ---- Create SenderKeyDistributionMessage ----
+@@ -511,4 +505,3 @@ function registerSignalHandlers(ipcMain) {
+ }
+ 
+ module.exports = { registerSignalHandlers };
+-
+diff --git a/client/electron/crypto/signalStore.js b/client/electron/crypto/signalStore.js
+index 28a1a4e..fbf375a 100644
+--- a/client/electron/crypto/signalStore.js
++++ b/client/electron/crypto/signalStore.js
+@@ -10,7 +10,8 @@
+  * AES-256-GCM using the master key from Electron safeStorage.
+  */
+ 
+-const Database = require('better-sqlite3');
++const { requireRuntimeModule, importLibsignalModule } = require('./runtimeModules');
++const { createMemoryProtocolStore } = require('./signalStoreMemory');
+ const crypto = require('crypto');
+ const path = require('path');
+ const { app } = require('electron');
+@@ -109,6 +110,7 @@ function migrateDatabase(db) {
+ }
+ 
+ function openDatabase(userId) {
++  const Database = requireRuntimeModule('better-sqlite3');
+   const dbPath = path.join(app.getPath('userData'), `signal-protocol-${userId}.db`);
+   const db = new Database(dbPath);
+   db.pragma('journal_mode = WAL');
+@@ -140,7 +142,7 @@ async function getProtocolStoreClass() {
+         PublicKey,
+         IdentityKeyPair,
+         IdentityChange,
+-      } = await import('@signalapp/libsignal-client');
++      } = await importLibsignalModule();
+ 
+ class SQLiteSessionStore extends SessionStore {
+   constructor(db, masterKey) {
+@@ -149,6 +151,7 @@ class SQLiteSessionStore extends SessionStore {
+     this._mk = masterKey;
+     this._save = db.prepare('INSERT OR REPLACE INTO sessions (address, record) VALUES (?, ?)');
+     this._get = db.prepare('SELECT record FROM sessions WHERE address = ?');
++    this._del = db.prepare('DELETE FROM sessions WHERE address = ?');
+   }
+ 
+   async saveSession(address, record) {
+@@ -173,6 +176,10 @@ class SQLiteSessionStore extends SessionStore {
+     }
+     return results;
+   }
++
++  async removeSession(address) {
++    this._del.run(address.toString());
++  }
+ }
+ 
+ class SQLiteIdentityKeyStore extends IdentityKeyStore {
+@@ -538,6 +545,10 @@ class ProtocolStore {
+     this.roomDistribution = new RoomDistributionMap(this._db);
+   }
+ 
++  async removeSession(address) {
++    await this.session.removeSession(address);
++  }
++
+   close() {
+     if (this._db) {
+       this._db.close();
+@@ -558,10 +569,24 @@ class ProtocolStore {
+   return protocolStoreClassPromise;
+ }
+ 
++function shouldUseMemoryStoreFallback(error) {
++  if (process.platform !== 'win32') return false;
++  const details = `${error?.message || ''}\n${error?.stack || ''}`;
++  return /better-sqlite3|better_sqlite3\.node|bindings/i.test(details);
++}
++
+ async function createProtocolStore(userId, masterKey) {
+   const ProtocolStore = await getProtocolStoreClass();
+-  return new ProtocolStore(userId, masterKey);
++  try {
++    return new ProtocolStore(userId, masterKey);
++  } catch (error) {
++    if (!shouldUseMemoryStoreFallback(error)) {
++      throw error;
++    }
++
++    console.warn('[Signal] better-sqlite3 unavailable; using in-memory Signal store fallback on Windows');
++    return createMemoryProtocolStore(userId, masterKey);
++  }
+ }
+ 
+ module.exports = { createProtocolStore };
+-
+diff --git a/client/electron/crypto/signalStoreMemory.js b/client/electron/crypto/signalStoreMemory.js
+new file mode 100644
+index 0000000..a0bbca5
+--- /dev/null
++++ b/client/electron/crypto/signalStoreMemory.js
+@@ -0,0 +1,446 @@
++const crypto = require('crypto');
++const { importLibsignalModule } = require('./runtimeModules');
++
++let memoryProtocolStoreClassPromise = null;
++
++function encrypt(masterKey, data, aad) {
++  const nonce = crypto.randomBytes(12);
++  const cipher = crypto.createCipheriv('aes-256-gcm', masterKey, nonce);
++  if (aad) cipher.setAAD(Buffer.from(aad));
++  const ct = Buffer.concat([cipher.update(data), cipher.final()]);
++  const tag = cipher.getAuthTag();
++  return Buffer.concat([nonce, tag, ct]);
++}
++
++function decrypt(masterKey, blob, aad) {
++  const nonce = blob.subarray(0, 12);
++  const tag = blob.subarray(12, 28);
++  const ct = blob.subarray(28);
++  const decipher = crypto.createDecipheriv('aes-256-gcm', masterKey, nonce);
++  decipher.setAuthTag(tag);
++  if (aad) decipher.setAAD(Buffer.from(aad));
++  return Buffer.concat([decipher.update(ct), decipher.final()]);
++}
++
++async function getMemoryProtocolStoreClass() {
++  if (!memoryProtocolStoreClassPromise) {
++    memoryProtocolStoreClassPromise = (async () => {
++      const {
++        SessionStore,
++        IdentityKeyStore,
++        PreKeyStore,
++        SignedPreKeyStore,
++        KyberPreKeyStore,
++        SenderKeyStore,
++        SessionRecord,
++        PreKeyRecord,
++        SignedPreKeyRecord,
++        KyberPreKeyRecord,
++        SenderKeyRecord,
++        PublicKey,
++        IdentityKeyPair,
++        IdentityChange,
++      } = await importLibsignalModule();
++
++      class MemorySessionStore extends SessionStore {
++        constructor(masterKey) {
++          super();
++          this._mk = masterKey;
++          this._sessions = new Map();
++        }
++
++        async saveSession(address, record) {
++          const addr = address.toString();
++          const blob = encrypt(this._mk, Buffer.from(record.serialize()), `session:${addr}`);
++          this._sessions.set(addr, blob);
++        }
++
++        async getSession(address) {
++          const addr = address.toString();
++          const record = this._sessions.get(addr);
++          if (!record) return null;
++          const data = decrypt(this._mk, record, `session:${addr}`);
++          return SessionRecord.deserialize(data);
++        }
++
++        async getExistingSessions(addresses) {
++          const results = [];
++          for (const addr of addresses) {
++            const session = await this.getSession(addr);
++            if (session) results.push(session);
++          }
++          return results;
++        }
++
++        async removeSession(address) {
++          this._sessions.delete(address.toString());
++        }
++      }
++
++      class MemoryIdentityKeyStore extends IdentityKeyStore {
++        constructor(masterKey) {
++          super();
++          this._mk = masterKey;
++          this._localIdentity = null;
++          this._identityKeys = new Map();
++        }
++
++        saveLocalIdentity(keyPair, registrationId) {
++          this._localIdentity = {
++            keyPair: encrypt(this._mk, Buffer.from(keyPair.serialize()), 'local_identity'),
++            registrationId,
++          };
++        }
++
++        hasLocalIdentity() {
++          return !!this._localIdentity;
++        }
++
++        _readIdentityRecord(addr) {
++          const row = this._identityKeys.get(addr);
++          if (!row) return null;
++
++          return {
++            keyBytes: decrypt(this._mk, row.publicKey, `identity:${addr}`),
++            trusted: row.trusted,
++            verified: row.verified,
++            firstSeen: row.firstSeen ?? null,
++            lastSeen: row.lastSeen ?? null,
++          };
++        }
++
++        _writeIdentityRecord(addr, keyBytes, { trusted = false, verified = false, firstSeen = Date.now(), lastSeen = Date.now() } = {}) {
++          this._identityKeys.set(addr, {
++            publicKey: encrypt(this._mk, keyBytes, `identity:${addr}`),
++            trusted: !!trusted,
++            verified: !!verified,
++            firstSeen,
++            lastSeen,
++          });
++        }
++
++        async getIdentityKey() {
++          if (!this._localIdentity) throw new Error('No local identity key');
++          const data = decrypt(this._mk, this._localIdentity.keyPair, 'local_identity');
++          return IdentityKeyPair.deserialize(data).privateKey;
++        }
++
++        async getLocalRegistrationId() {
++          if (!this._localIdentity) throw new Error('No local identity');
++          return this._localIdentity.registrationId;
++        }
++
++        async approveIdentity(address, key, options = {}) {
++          const addr = address.toString();
++          const existing = this._readIdentityRecord(addr);
++          const keyBytes = Buffer.from(key.serialize());
++          const now = Date.now();
++          const changed = existing ? !keyBytes.equals(existing.keyBytes) : false;
++          const verified = options.verified === true ? true : (changed ? false : !!existing?.verified);
++
++          this._writeIdentityRecord(addr, keyBytes, {
++            trusted: true,
++            verified,
++            firstSeen: existing?.firstSeen ?? now,
++            lastSeen: now,
++          });
++
++          return { changed, verified };
++        }
++
++        async markIdentityVerified(address, key) {
++          return this.approveIdentity(address, key, { verified: true });
++        }
++
++        async getTrustState(address, key = null) {
++          const addr = address.toString();
++          const existing = this._readIdentityRecord(addr);
++          if (!existing) {
++            return {
++              status: 'new',
++              trusted: false,
++              verified: false,
++              firstSeen: null,
++              lastSeen: null,
++              identityKey: null,
++            };
++          }
++
++          const candidateBytes = key ? Buffer.from(key.serialize()) : null;
++          if (candidateBytes && !candidateBytes.equals(existing.keyBytes)) {
++            return {
++              status: 'key_changed',
++              trusted: false,
++              verified: false,
++              firstSeen: existing.firstSeen,
++              lastSeen: existing.lastSeen,
++              identityKey: existing.keyBytes.toString('base64'),
++            };
++          }
++
++          return {
++            status: existing.trusted ? 'trusted' : 'new',
++            trusted: existing.trusted,
++            verified: existing.verified,
++            firstSeen: existing.firstSeen,
++            lastSeen: existing.lastSeen,
++            identityKey: existing.keyBytes.toString('base64'),
++          };
++        }
++
++        async saveIdentity(address, key) {
++          const addr = address.toString();
++          const existing = this._readIdentityRecord(addr);
++          const keyBytes = Buffer.from(key.serialize());
++          const now = Date.now();
++
++          if (!existing) {
++            this._writeIdentityRecord(addr, keyBytes, {
++              trusted: false,
++              verified: false,
++              firstSeen: now,
++              lastSeen: now,
++            });
++            return IdentityChange.NewOrUnchanged;
++          }
++
++          const changed = !keyBytes.equals(existing.keyBytes);
++          if (changed) {
++            this._writeIdentityRecord(addr, keyBytes, {
++              trusted: false,
++              verified: false,
++              firstSeen: existing.firstSeen ?? now,
++              lastSeen: now,
++            });
++            return IdentityChange.ReplacedExisting;
++          }
++
++          this._writeIdentityRecord(addr, keyBytes, {
++            trusted: existing.trusted,
++            verified: existing.verified,
++            firstSeen: existing.firstSeen ?? now,
++            lastSeen: now,
++          });
++          return IdentityChange.NewOrUnchanged;
++        }
++
++        async isTrustedIdentity(address, key) {
++          const addr = address.toString();
++          const existing = this._readIdentityRecord(addr);
++          if (!existing || !existing.trusted) return false;
++
++          const newKey = Buffer.from(key.serialize());
++          return newKey.equals(existing.keyBytes);
++        }
++
++        async getIdentity(address) {
++          const addr = address.toString();
++          const existing = this._readIdentityRecord(addr);
++          if (!existing) return null;
++          return PublicKey.deserialize(existing.keyBytes);
++        }
++
++        getLocalIdentityKeyPair() {
++          if (!this._localIdentity) return null;
++          const data = decrypt(this._mk, this._localIdentity.keyPair, 'local_identity');
++          return IdentityKeyPair.deserialize(data);
++        }
++      }
++
++      class MemoryPreKeyStore extends PreKeyStore {
++        constructor(masterKey) {
++          super();
++          this._mk = masterKey;
++          this._preKeys = new Map();
++        }
++
++        async savePreKey(id, record) {
++          const blob = encrypt(this._mk, Buffer.from(record.serialize()), `prekey:${id}`);
++          this._preKeys.set(id, blob);
++        }
++
++        async getPreKey(id) {
++          const record = this._preKeys.get(id);
++          if (!record) throw new Error(`PreKey ${id} not found`);
++          const data = decrypt(this._mk, record, `prekey:${id}`);
++          return PreKeyRecord.deserialize(data);
++        }
++
++        async removePreKey(id) {
++          this._preKeys.delete(id);
++        }
++
++        getMaxKeyId() {
++          return this._preKeys.size ? Math.max(...this._preKeys.keys()) : 0;
++        }
++
++        getCount() {
++          return this._preKeys.size;
++        }
++
++        getAllIds() {
++          return [...this._preKeys.keys()].sort((a, b) => a - b);
++        }
++      }
++
++      class MemorySignedPreKeyStore extends SignedPreKeyStore {
++        constructor(masterKey) {
++          super();
++          this._mk = masterKey;
++          this._signedPreKeys = new Map();
++        }
++
++        async saveSignedPreKey(id, record) {
++          const blob = encrypt(this._mk, Buffer.from(record.serialize()), `spk:${id}`);
++          this._signedPreKeys.set(id, blob);
++        }
++
++        async getSignedPreKey(id) {
++          const record = this._signedPreKeys.get(id);
++          if (!record) throw new Error(`SignedPreKey ${id} not found`);
++          const data = decrypt(this._mk, record, `spk:${id}`);
++          return SignedPreKeyRecord.deserialize(data);
++        }
++
++        getMaxKeyId() {
++          return this._signedPreKeys.size ? Math.max(...this._signedPreKeys.keys()) : 0;
++        }
++      }
++
++      class MemoryKyberPreKeyStore extends KyberPreKeyStore {
++        constructor(masterKey) {
++          super();
++          this._mk = masterKey;
++          this._kyberPreKeys = new Map();
++        }
++
++        async saveKyberPreKey(id, record) {
++          const blob = encrypt(this._mk, Buffer.from(record.serialize()), `kyber:${id}`);
++          this._kyberPreKeys.set(id, { record: blob, used: false });
++        }
++
++        async getKyberPreKey(id) {
++          const entry = this._kyberPreKeys.get(id);
++          if (!entry) throw new Error(`KyberPreKey ${id} not found`);
++          const data = decrypt(this._mk, entry.record, `kyber:${id}`);
++          return KyberPreKeyRecord.deserialize(data);
++        }
++
++        async markKyberPreKeyUsed(id) {
++          const entry = this._kyberPreKeys.get(id);
++          if (entry) entry.used = true;
++        }
++
++        getMaxKeyId() {
++          return this._kyberPreKeys.size ? Math.max(...this._kyberPreKeys.keys()) : 0;
++        }
++
++        getCount() {
++          return [...this._kyberPreKeys.values()].filter((entry) => !entry.used).length;
++        }
++
++        getAllIds() {
++          return [...this._kyberPreKeys.entries()]
++            .filter(([, entry]) => !entry.used)
++            .map(([id]) => id)
++            .sort((a, b) => a - b);
++        }
++      }
++
++      class MemorySenderKeyStore extends SenderKeyStore {
++        constructor(masterKey) {
++          super();
++          this._mk = masterKey;
++          this._senderKeys = new Map();
++        }
++
++        _key(addr, distributionId) {
++          return `${addr}::${distributionId}`;
++        }
++
++        async saveSenderKey(address, distributionId, record) {
++          const addr = address.toString();
++          const aad = `sk:${addr}:${distributionId}`;
++          const blob = encrypt(this._mk, Buffer.from(record.serialize()), aad);
++          this._senderKeys.set(this._key(addr, distributionId), blob);
++        }
++
++        async getSenderKey(address, distributionId) {
++          const addr = address.toString();
++          const record = this._senderKeys.get(this._key(addr, distributionId));
++          if (!record) return null;
++          const aad = `sk:${addr}:${distributionId}`;
++          const data = decrypt(this._mk, record, aad);
++          return SenderKeyRecord.deserialize(data);
++        }
++
++        deleteSenderKeysForRoom(distributionId) {
++          for (const key of this._senderKeys.keys()) {
++            if (key.endsWith(`::${distributionId}`)) {
++              this._senderKeys.delete(key);
++            }
++          }
++        }
++      }
++
++      class RoomDistributionMap {
++        constructor() {
++          this._roomDistribution = new Map();
++        }
++
++        getOrCreate(roomId) {
++          const existing = this._roomDistribution.get(roomId);
++          if (existing) return existing;
++          const id = crypto.randomUUID();
++          this._roomDistribution.set(roomId, id);
++          return id;
++        }
++
++        get(roomId) {
++          return this._roomDistribution.get(roomId) ?? null;
++        }
++
++        reset(roomId) {
++          const id = crypto.randomUUID();
++          this._roomDistribution.set(roomId, id);
++          return id;
++        }
++      }
++
++      class MemoryProtocolStore {
++        constructor(_userId, masterKey) {
++          this._mk = masterKey;
++          this.session = new MemorySessionStore(masterKey);
++          this.identity = new MemoryIdentityKeyStore(masterKey);
++          this.preKey = new MemoryPreKeyStore(masterKey);
++          this.signedPreKey = new MemorySignedPreKeyStore(masterKey);
++          this.kyberPreKey = new MemoryKyberPreKeyStore(masterKey);
++          this.senderKey = new MemorySenderKeyStore(masterKey);
++          this.roomDistribution = new RoomDistributionMap();
++        }
++
++        async removeSession(address) {
++          await this.session.removeSession(address);
++        }
++
++        close() {
++          if (this._mk) {
++            this._mk.fill(0);
++            this._mk = null;
++          }
++        }
++      }
++
++      return MemoryProtocolStore;
++    })();
++  }
++
++  return memoryProtocolStoreClassPromise;
++}
++
++async function createMemoryProtocolStore(userId, masterKey) {
++  const MemoryProtocolStore = await getMemoryProtocolStoreClass();
++  return new MemoryProtocolStore(userId, masterKey);
++}
++
++module.exports = { createMemoryProtocolStore };
+diff --git a/client/forge.config.js b/client/forge.config.js
+index cc95904..9a7a8ce 100644
+--- a/client/forge.config.js
++++ b/client/forge.config.js
+@@ -21,6 +21,69 @@ function copyDirSync(src, dest) {
+   }
+ }
+ 
++function copyRuntimeFilesIntoBuild(buildPath) {
++  const rootModules = path.resolve(__dirname, 'node_modules');
++  const buildModules = path.join(buildPath, 'node_modules');
++  fs.mkdirSync(buildModules, { recursive: true });
++
++  for (const dep of NATIVE_DEPS) {
++    const src = path.join(rootModules, dep);
++    const dest = path.join(buildModules, dep);
++    if (fs.existsSync(src)) {
++      copyDirSync(src, dest);
++    }
++  }
++
++  const transitiveDeps = ['node-gyp-build', 'uuid', 'type-fest', 'bindings', 'file-uri-to-path'];
++  for (const dep of transitiveDeps) {
++    const src = path.join(rootModules, dep);
++    const dest = path.join(buildModules, dep);
++    if (fs.existsSync(src) && !fs.existsSync(dest)) {
++      copyDirSync(src, dest);
++    }
++  }
++
++  for (const relDir of RUNTIME_SOURCE_DIRS) {
++    const src = path.join(__dirname, relDir);
++    const dest = path.join(buildPath, relDir);
++    if (fs.existsSync(src)) {
++      copyDirSync(src, dest);
++    }
++  }
++}
++
++function getPackagedResourcesDir(outputPath, platform) {
++  if (platform === 'darwin') {
++    return path.join(outputPath, 'Byzantine.app', 'Contents', 'Resources');
++  }
++
++  return path.join(outputPath, 'resources');
++}
++
++function copyRuntimeFilesIntoPackagedApp(outputPath, platform) {
++  const resourcesDir = getPackagedResourcesDir(outputPath, platform);
++  const vendorModulesDir = path.join(resourcesDir, 'vendor', 'node_modules');
++  fs.mkdirSync(vendorModulesDir, { recursive: true });
++
++  const rootModules = path.resolve(__dirname, 'node_modules');
++  const packages = [
++    ...NATIVE_DEPS,
++    'node-gyp-build',
++    'uuid',
++    'type-fest',
++    'bindings',
++    'file-uri-to-path',
++  ];
++
++  for (const dep of packages) {
++    const src = path.join(rootModules, dep);
++    const dest = path.join(vendorModulesDir, dep);
++    if (fs.existsSync(src)) {
++      copyDirSync(src, dest);
++    }
++  }
++}
++
+ module.exports = {
+   packagerConfig: {
+     name: 'Byzantine',
+@@ -32,42 +95,11 @@ module.exports = {
+   },
+   hooks: {
+     packageAfterCopy: async (_config, buildPath) => {
+-      // Copy native deps from monorepo root node_modules into the build
+-      const rootModules = path.resolve(__dirname, '..', 'node_modules');
+-      const buildModules = path.join(buildPath, 'node_modules');
+-      fs.mkdirSync(buildModules, { recursive: true });
+-
+-      for (const dep of NATIVE_DEPS) {
+-        const src = path.join(rootModules, dep);
+-        const dest = path.join(buildModules, dep);
+-        if (fs.existsSync(src)) {
+-          copyDirSync(src, dest);
+-        }
+-      }
+-
+-      // Runtime transitive deps:
+-      // libsignal-client needs: node-gyp-build (loads .node), uuid, type-fest
+-      // better-sqlite3 needs: bindings (loads .node), file-uri-to-path
+-      const transitiveDeps = ['node-gyp-build', 'uuid', 'type-fest', 'bindings', 'file-uri-to-path'];
+-      for (const dep of transitiveDeps) {
+-        const src = path.join(rootModules, dep);
+-        const dest = path.join(buildModules, dep);
+-        if (fs.existsSync(src) && !fs.existsSync(dest)) {
+-          copyDirSync(src, dest);
+-        }
+-      }
+-
+-      // Keep raw main-process crypto helpers available at runtime.
+-      // Vite leaves the require() in main.js, so packaged builds need these files copied in.
+-      for (const relDir of RUNTIME_SOURCE_DIRS) {
+-        const src = path.join(__dirname, relDir);
+-        const dest = path.join(buildPath, relDir);
+-        if (fs.existsSync(src)) {
+-          copyDirSync(src, dest);
+-        }
+-      }
++      copyRuntimeFilesIntoBuild(buildPath);
+     },
+     packageAfterPrune: async (_config, buildPath) => {
++      copyRuntimeFilesIntoBuild(buildPath);
++
+       // Rebuild native addons for the target Electron version
+       const { rebuild } = require('@electron/rebuild');
+       await rebuild({
+@@ -76,6 +108,11 @@ module.exports = {
+         force: true,
+       });
+     },
++    postPackage: async (_config, packageResult) => {
++      for (const outputPath of packageResult.outputPaths) {
++        copyRuntimeFilesIntoPackagedApp(outputPath, packageResult.platform);
++      }
++    },
+   },
+   makers: [
+     {
+@@ -110,4 +147,3 @@ module.exports = {
+     }),
+   ],
+ };
+-
+diff --git a/docs/WINDOWS-BUILD.md b/docs/WINDOWS-BUILD.md
+new file mode 100644
+index 0000000..f7feb03
+--- /dev/null
++++ b/docs/WINDOWS-BUILD.md
+@@ -0,0 +1,203 @@
++# Windows Build Runbook
++
++This is the fastest path to build a real Windows desktop artifact for `/guild`
++on a Windows machine instead of cross-building from macOS.
++
++Current status:
++
++- Windows packaging is `zip` only
++- there is no Windows installer `.exe` yet
++- the app executable lives inside the extracted app folder as `byzantine.exe`
++
++If you see `Cannot find module 'better-sqlite3'`, you are almost certainly
++launching an older broken zip. Build a fresh artifact with the steps below and
++extract it into a brand new folder before testing.
++
++## 1. Prerequisites
++
++Install these on the Windows machine first:
++
++- `Git`
++- `Node.js 22 LTS`
++- `Python 3`
++- `Visual Studio 2022 Build Tools`
++
++For Visual Studio Build Tools, make sure this workload is installed:
++
++- `Desktop development with C++`
++
++That gives native Electron modules like `better-sqlite3` a real Windows build
++environment.
++
++## 2. Get The Repo
++
++Clone the repo somewhere simple, for example:
++
++```powershell
++git clone <YOUR_REPO_URL> R:\Projects\guild-main
++cd R:\Projects\guild-main
++```
++
++If you already have the repo on the Windows box, pull the latest changes first.
++
++## 3. Install Dependencies
++
++From the repo root:
++
++```powershell
++npm install
++```
++
++This project uses npm workspaces, so install from the root, not from `client/`
++first.
++
++## 4. Clean Old Windows Artifacts
++
++Before building, remove any stale packaged output so you do not accidentally
++test an old zip.
++
++From the repo root:
++
++```powershell
++Remove-Item -Recurse -Force .\client\out -ErrorAction SilentlyContinue
++```
++
++If you already extracted a previous Windows build somewhere else, delete that
++old extracted folder too.
++
++## 5. Build The Windows App
++
++From the repo root:
++
++```powershell
++cd .\client
++npm run make -- --platform=win32 --arch=x64
++```
++
++If the build succeeds, the zip will be here:
++
++```text
++client\out\make\zip\win32\x64\Byzantine-win32-x64-1.0.0.zip
++```
++
++The packaged app folder will also exist here:
++
++```text
++client\out\Byzantine-win32-x64
++```
++
++## 6. Test The Build On Windows
++
++Do not launch the app out of the zip preview.
++
++Instead:
++
++1. Copy the zip somewhere easy to find
++2. Extract it fully
++3. Open the extracted folder
++4. Run `byzantine.exe`
++
++Example PowerShell extraction:
++
++```powershell
++Expand-Archive `
++  -Path .\client\out\make\zip\win32\x64\Byzantine-win32-x64-1.0.0.zip `
++  -DestinationPath .\client\out\test-Byzantine-win32-x64 `
++  -Force
++```
++
++Then launch:
++
++```powershell
++Start-Process .\client\out\test-Byzantine-win32-x64\Byzantine-win32-x64\byzantine.exe
++```
++
++## 7. Quick Sanity Checks
++
++Before you upload the zip anywhere, verify:
++
++- the app launches without the `better-sqlite3` crash
++- login opens
++- the app reaches the server
++- secure startup completes
++
++Optional quick file check:
++
++```powershell
++Get-ChildItem .\client\out\make\zip\win32\x64
++```
++
++## 8. Upload To FlokiNET
++
++If you want to replace the current Windows test zip on FlokiNET from the
++Windows machine directly, use `scp`.
++
++From the repo root on Windows:
++
++```powershell
++scp .\client\out\make\zip\win32\x64\Byzantine-win32-x64-1.0.0.zip `
++  eddifyx@82.221.100.187:/home/eddifyx/
++```
++
++Then SSH into the VPS:
++
++```powershell
++ssh eddifyx@82.221.100.187
++```
++
++On the VPS:
++
++```bash
++sudo cp /home/eddifyx/Byzantine-win32-x64-1.0.0.zip /opt/guild/server/updates/Byzantine-win32-x64-1.0.0.zip
++```
++
++## 9. Troubleshooting
++
++### `Cannot find module 'better-sqlite3'`
++
++This usually means one of these:
++
++- you launched an older zip
++- you extracted over an older folder instead of using a fresh one
++- the Windows build did not complete successfully
++
++Fix:
++
++1. delete old extracted folders
++2. delete `client\out`
++3. rebuild
++4. extract to a brand new folder
++
++### Build fails during native dependency compilation
++
++Usually this means the Windows build machine is missing:
++
++- C++ build tools
++- Python
++- a proper Node installation
++
++Re-check the prerequisites in section 1.
++
++### SmartScreen warning
++
++That is expected for an unsigned Windows test build.
++
++If you trust the artifact you just built yourself:
++
++- click `More info`
++- then `Run anyway`
++
++## 10. Current Windows Packaging Notes
++
++Right now this repo produces:
++
++- a Windows `zip`
++
++It does **not** currently produce:
++
++- a signed Windows installer
++- a standalone installer `.exe`
++- MSI
++
++If we want a cleaner Windows release flow later, the next step is adding a real
++Windows installer target such as Squirrel or WiX.
+-- 
+2.50.1 (Apple Git-155)
+

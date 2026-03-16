@@ -13,18 +13,12 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { createProtocolStore } = require('./signalStore');
+const { importLibsignalModule } = require('./runtimeModules');
 let signalModulePromise = null;
 
 async function getSignalModule() {
   if (!signalModulePromise) {
-    const originalCwd = process.cwd();
-    const libsignalPackageJson = require.resolve('@signalapp/libsignal-client/package.json');
-    const libsignalRoot = path.dirname(libsignalPackageJson);
-
-    process.chdir(libsignalRoot);
-    signalModulePromise = import('@signalapp/libsignal-client').finally(() => {
-      process.chdir(originalCwd);
-    });
+    signalModulePromise = importLibsignalModule();
   }
 
   return signalModulePromise;
@@ -38,29 +32,157 @@ let store = null;
 let userId = null;
 
 // ---------------------------------------------------------------------------
-// Master key management (Electron safeStorage → OS keychain)
-// Persisted to a file in userData so it survives app restarts.
+// Master key management.
+// Preferred path: Electron safeStorage → OS keychain.
+// Fallback path: app-local base64 file when keychain access is denied/unavailable.
+// This preserves login/E2EE functionality without forcing a keychain approval
+// dialog, at the cost of weaker at-rest protection on that device.
 // ---------------------------------------------------------------------------
 
-function _masterKeyPath(uid) {
+function _encryptedMasterKeyPath(uid) {
   return path.join(app.getPath('userData'), `signal-mk-${uid}.enc`);
 }
 
-function getMasterKey(uid) {
-  const mkPath = _masterKeyPath(uid);
+function _fallbackMasterKeyPath(uid) {
+  return path.join(app.getPath('userData'), `signal-mk-${uid}.b64`);
+}
 
-  if (fs.existsSync(mkPath)) {
-    const encrypted = fs.readFileSync(mkPath);
-    return safeStorage.decryptString(encrypted);
+function _protocolStorePaths(uid) {
+  const dbPath = path.join(app.getPath('userData'), `signal-protocol-${uid}.db`);
+  return [
+    dbPath,
+    `${dbPath}-wal`,
+    `${dbPath}-shm`,
+  ];
+}
+
+function isSafeStorageUsable() {
+  try {
+    return safeStorage.isEncryptionAvailable();
+  } catch {
+    return false;
+  }
+}
+
+function generateMasterKeyBase64() {
+  return crypto.randomBytes(32).toString('base64');
+}
+
+function writeFallbackMasterKey(filePath, mkB64) {
+  fs.writeFileSync(filePath, `${mkB64}\n`, { mode: 0o600 });
+}
+
+function ensureFallbackMasterKey(uid) {
+  const fallbackPath = _fallbackMasterKeyPath(uid);
+  if (fs.existsSync(fallbackPath)) {
+    return fs.readFileSync(fallbackPath, 'utf8').trim();
   }
 
-  // Generate new master key and persist the safeStorage-encrypted blob to disk
-  const mk = crypto.randomBytes(32);
-  const mkB64 = mk.toString('base64');
-  const encrypted = safeStorage.encryptString(mkB64);
-  fs.writeFileSync(mkPath, encrypted);
-
+  const mkB64 = generateMasterKeyBase64();
+  writeFallbackMasterKey(fallbackPath, mkB64);
   return mkB64;
+}
+
+function getMasterKey(uid) {
+  const encryptedPath = _encryptedMasterKeyPath(uid);
+  const fallbackPath = _fallbackMasterKeyPath(uid);
+
+  // Once a fallback file exists, keep using it so we don't bounce between
+  // secure and non-secure stores across launches.
+  if (fs.existsSync(fallbackPath)) {
+    return {
+      keyBase64: fs.readFileSync(fallbackPath, 'utf8').trim(),
+      storage: 'fallback',
+      requiresStoreReset: false,
+    };
+  }
+
+  if (fs.existsSync(encryptedPath)) {
+    if (isSafeStorageUsable()) {
+      try {
+        const encrypted = fs.readFileSync(encryptedPath);
+        return {
+          keyBase64: safeStorage.decryptString(encrypted),
+          storage: 'secure',
+          requiresStoreReset: false,
+        };
+      } catch (error) {
+        console.warn('[Signal] Failed to read OS-keychain-backed master key; falling back to local storage:', error);
+      }
+    } else {
+      console.warn('[Signal] OS keychain unavailable; falling back to local Signal key storage for this device.');
+    }
+
+    return {
+      keyBase64: ensureFallbackMasterKey(uid),
+      storage: 'fallback-recovery',
+      requiresStoreReset: true,
+    };
+  }
+
+  // Generate new master key and persist it via the best available local path.
+  const mkB64 = generateMasterKeyBase64();
+
+  if (isSafeStorageUsable()) {
+    try {
+      const encrypted = safeStorage.encryptString(mkB64);
+      fs.writeFileSync(encryptedPath, encrypted);
+      return {
+        keyBase64: mkB64,
+        storage: 'secure',
+        requiresStoreReset: false,
+      };
+    } catch (error) {
+      console.warn('[Signal] Failed to persist OS-keychain-backed master key; using local fallback storage instead:', error);
+    }
+  }
+
+  writeFallbackMasterKey(fallbackPath, mkB64);
+  return {
+    keyBase64: mkB64,
+    storage: 'fallback',
+    requiresStoreReset: false,
+  };
+}
+
+function resetSignalProtocolStore(uid) {
+  for (const filePath of _protocolStorePaths(uid)) {
+    try {
+      if (fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath);
+      }
+    } catch (error) {
+      console.warn('[Signal] Failed to remove stale protocol store file:', filePath, error);
+    }
+  }
+}
+
+function shouldResetProtocolStore(error) {
+  const details = `${error?.message || ''}\n${error?.stack || ''}`;
+  return /authenticate data|bad decrypt|unable to authenticate|unsupported state/i.test(details);
+}
+
+async function bootstrapLocalIdentity(store) {
+  const { IdentityKeyPair } = await getSignalModule();
+  const identityKeyPair = IdentityKeyPair.generate();
+  const registrationId = (crypto.randomInt(16383) + 1); // 1-16383
+
+  store.identity.saveLocalIdentity(identityKeyPair, registrationId);
+
+  const preKeys = await generatePreKeys(1, OTP_BATCH_SIZE);
+  for (const pk of preKeys) {
+    await store.preKey.savePreKey(pk.id(), pk);
+  }
+
+  const spk = await generateSignedPreKey(identityKeyPair, 1);
+  await store.signedPreKey.saveSignedPreKey(spk.id(), spk);
+
+  for (let i = 0; i < KYBER_BATCH_SIZE; i++) {
+    const kpk = await generateKyberPreKey(identityKeyPair, i + 1);
+    await store.kyberPreKey.saveKyberPreKey(kpk.id(), kpk);
+  }
+
+  return identityKeyPair;
 }
 
 // ---------------------------------------------------------------------------
@@ -110,47 +232,45 @@ function registerSignalHandlers(ipcMain) {
   // ---- Initialize ----
   ipcMain.handle('signal:initialize', async (_event, uid) => {
     userId = uid;
+    const masterKeyState = getMasterKey(uid);
+    let resetAttempted = false;
 
-    if (!safeStorage.isEncryptionAvailable()) {
-      throw new Error('OS keychain (safeStorage) not available');
-    }
+    while (true) {
+      const masterKey = Buffer.from(masterKeyState.keyBase64, 'base64');
+      store = await createProtocolStore(uid, masterKey);
 
-    const { IdentityKeyPair } = await getSignalModule();
-    const mkBase64 = getMasterKey(uid);
-    const masterKey = Buffer.from(mkBase64, 'base64');
-    store = await createProtocolStore(uid, masterKey);
+      try {
+        let isNew = false;
+        if (!store.identity.hasLocalIdentity()) {
+          isNew = true;
+          await bootstrapLocalIdentity(store);
+        }
 
-    let isNew = false;
-    if (!store.identity.hasLocalIdentity()) {
-      isNew = true;
-      // Generate identity key pair and registration ID
-      const identityKeyPair = IdentityKeyPair.generate();
-      const registrationId = (crypto.randomInt(16383) + 1); // 1-16383
+        const localIdentity = store.identity.getLocalIdentityKeyPair();
+        return {
+          isNew,
+          identityKeyPublic: Buffer.from(localIdentity.publicKey.serialize()).toString('base64'),
+        };
+      } catch (error) {
+        const canRecoverByResettingStore =
+          !resetAttempted &&
+          masterKeyState.storage !== 'secure' &&
+          (masterKeyState.requiresStoreReset || shouldResetProtocolStore(error));
 
-      store.identity.saveLocalIdentity(identityKeyPair, registrationId);
+        if (!canRecoverByResettingStore) {
+          throw error;
+        }
 
-      // Generate initial prekeys
-      const preKeys = await generatePreKeys(1, OTP_BATCH_SIZE);
-      for (const pk of preKeys) {
-        await store.preKey.savePreKey(pk.id(), pk);
+        console.warn('[Signal] Resetting local Signal store after secure-storage denial or unreadable encrypted state:', error);
+        resetAttempted = true;
+
+        if (store) {
+          store.close();
+          store = null;
+        }
+        resetSignalProtocolStore(uid);
       }
-
-      // Generate initial signed prekey
-      const spk = await generateSignedPreKey(identityKeyPair, 1);
-      await store.signedPreKey.saveSignedPreKey(spk.id(), spk);
-
-      // Generate initial Kyber prekeys
-      for (let i = 0; i < KYBER_BATCH_SIZE; i++) {
-        const kpk = await generateKyberPreKey(identityKeyPair, i + 1);
-        await store.kyberPreKey.saveKyberPreKey(kpk.id(), kpk);
-      }
     }
-
-    const localIdentity = store.identity.getLocalIdentityKeyPair();
-    return {
-      isNew,
-      identityKeyPublic: Buffer.from(localIdentity.publicKey.serialize()).toString('base64'),
-    };
   });
 
   // ---- Destroy (logout) ----
@@ -348,8 +468,8 @@ function registerSignalHandlers(ipcMain) {
   ipcMain.handle('signal:delete-session', async (_event, recipientId) => {
     if (!store) return;
     const { ProtocolAddress } = await getSignalModule();
-    const addr = ProtocolAddress.new(recipientId, DEVICE_ID).toString();
-    store._db.prepare('DELETE FROM sessions WHERE address = ?').run(addr);
+    const address = ProtocolAddress.new(recipientId, DEVICE_ID);
+    await store.removeSession(address);
   });
 
   // ---- Create SenderKeyDistributionMessage ----
@@ -405,12 +525,26 @@ function registerSignalHandlers(ipcMain) {
   ipcMain.handle('signal:group-decrypt', async (_event, senderId, roomId, payloadB64) => {
     if (!store) throw new Error('Signal store not initialized');
 
-    const { ProtocolAddress, groupDecrypt } = await getSignalModule();
-    const senderAddress = ProtocolAddress.new(senderId, DEVICE_ID);
-    const payload = Buffer.from(payloadB64, 'base64');
+    try {
+      const { ProtocolAddress, groupDecrypt } = await getSignalModule();
+      const senderAddress = ProtocolAddress.new(senderId, DEVICE_ID);
+      const payload = Buffer.from(payloadB64, 'base64');
 
-    const plaintext = await groupDecrypt(senderAddress, store.senderKey, payload);
-    return Buffer.from(plaintext).toString('utf8');
+      const plaintext = await groupDecrypt(senderAddress, store.senderKey, payload);
+      return {
+        ok: true,
+        plaintext: Buffer.from(plaintext).toString('utf8'),
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        error: {
+          message: err?.message || String(err || 'Group decrypt failed'),
+          code: err?.code ?? null,
+          operation: err?.operation ?? null,
+        },
+      };
+    }
   });
 
   // ---- Re-key room (forward secrecy on member leave) ----
@@ -511,4 +645,3 @@ function registerSignalHandlers(ipcMain) {
 }
 
 module.exports = { registerSignalHandlers };
-

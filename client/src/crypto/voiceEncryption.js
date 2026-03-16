@@ -27,7 +27,22 @@ let _prevVoiceKey = null;
 let _prevVoiceKeyEpoch = 0;
 let _prevKeyTimer = null;
 
-export function generateVoiceKey() {
+function emitVoiceKeyEnvelope(socket, toUserId, envelope) {
+  return new Promise((resolve, reject) => {
+    socket.emit('dm:sender_key', { toUserId, envelope }, (response) => {
+      if (response?.ok) {
+        resolve();
+        return;
+      }
+      reject(new Error(response?.error || 'Voice key delivery was rejected by the server.'));
+    });
+  });
+}
+
+export function generateVoiceKey({ minEpoch = null } = {}) {
+  if (Number.isInteger(minEpoch) && minEpoch > _voiceKeyEpoch) {
+    _voiceKeyEpoch = Math.min(65534, Math.max(0, minEpoch - 1));
+  }
   if (_voiceKeyEpoch >= 65535) {
     throw new Error('Voice key epoch exhausted. Rejoin the voice channel to reset.');
   }
@@ -266,10 +281,7 @@ export async function distributeVoiceKey(channelId, participantUserIds, key, epo
       });
 
       const envelope = await encryptDirectMessage(participantId, payload);
-      socket.emit('dm:sender_key', {
-        toUserId: participantId,
-        envelope,
-      });
+      await emitVoiceKeyEnvelope(socket, participantId, envelope);
     } catch (err) {
       console.error(`Failed to distribute voice key to ${participantId}:`, err);
       failures.push(participantId);

@@ -1,6 +1,7 @@
 {
-  "name": "byzantine",
-  "version": "1.0.35",
+  "name": "guild",
+  "productName": "guild",
+  "version": "1.0.40",
   "private": true,
   "description": "/guild encrypted messenger",
   "author": "/guild",
@@ -8,12 +9,15 @@
   "scripts": {
     "start": "electron-forge start",
     "package": "electron-forge package",
-    "make": "electron-forge make"
+    "make": "electron-forge make",
+    "make:mac-release": "GUILD_MAC_SIGN=1 electron-forge make --platform=darwin --arch=arm64",
+    "verify:mac-release": "node scripts/verify-mac-release-env.js"
   },
   "dependencies": {
     "@noble/ciphers": "^1.2.0",
     "@noble/curves": "^1.8.0",
     "@noble/hashes": "^1.7.0",
+    "@sapphi-red/web-noise-suppressor": "^0.3.5",
     "@signalapp/libsignal-client": "^0.88.1",
     "better-sqlite3": "^12.6.2",
     "date-fns": "^3.3.1",

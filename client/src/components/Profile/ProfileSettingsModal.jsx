@@ -4,8 +4,8 @@ import { useAuth } from '../../contexts/AuthContext';
 import { nip19 } from 'nostr-tools';
 import Avatar from '../Common/Avatar';
 
-export default function ProfileSettingsModal({ onClose }) {
-  const { user } = useAuth();
+export default function ProfileSettingsModal({ onClose, onSaved }) {
+  const { user, syncNostrProfile } = useAuth();
   const [name, setName] = useState(user?.username || '');
   const [about, setAbout] = useState('');
   const [picture, setPicture] = useState(user?.profilePicture || '');
@@ -60,12 +60,51 @@ export default function ProfileSettingsModal({ onClose }) {
   };
 
   const handlePublish = async () => {
+    const nextProfile = {
+      name: (name || '').trim().slice(0, 50),
+      about: (about || '').trim().slice(0, 250),
+      picture: (picture || '').trim(),
+      banner: (banner || '').trim(),
+      lud16: (lud16 || '').trim(),
+    };
+
+    if (nextProfile.picture && !/^https?:\/\//i.test(nextProfile.picture)) {
+      setError('Profile picture must be an http(s) URL');
+      return;
+    }
+
     setSaving(true);
     setError('');
     setSuccess('');
-    const result = await publishProfile({ name, about, picture, banner, lud16 });
+    const result = await publishProfile(nextProfile);
     if (result.ok) {
-      setSuccess('Profile published to Nostr relays');
+      let syncError = null;
+      let syncedUser = null;
+
+      try {
+        const syncResult = await syncNostrProfile(nextProfile);
+        syncedUser = syncResult?.syncedUser || null;
+      } catch (err) {
+        syncError = err;
+      }
+
+      const savedProfile = {
+        name: nextProfile.name || syncedUser?.username || user?.username || '',
+        about: nextProfile.about,
+        picture: syncedUser?.profilePicture ?? (nextProfile.picture || null),
+        banner: nextProfile.banner,
+        lud16: syncedUser?.lud16 ?? (nextProfile.lud16 || null),
+      };
+
+      if (onSaved) {
+        onSaved(savedProfile);
+      }
+
+      setSuccess(
+        syncError
+          ? `Profile published to Nostr relays, but /guild sync failed: ${syncError.message}`
+          : 'Profile published to Nostr relays'
+      );
       setTimeout(() => setSuccess(''), 3000);
     } else {
       setError(result.error || 'Publish failed');
@@ -99,7 +138,7 @@ export default function ProfileSettingsModal({ onClose }) {
               {picture ? (
                 <img src={picture} alt="Profile" style={{ width: 64, height: 64, borderRadius: '50%', objectFit: 'cover', border: '2px solid var(--border)' }} />
               ) : (
-                <Avatar username={user?.username || '?'} color={user?.avatarColor || '#40FF40'} size={64} profilePicture={user?.profilePicture} />
+                <Avatar username={name || user?.username || '?'} color={user?.avatarColor || '#40FF40'} size={64} profilePicture={null} />
               )}
               <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                 <button

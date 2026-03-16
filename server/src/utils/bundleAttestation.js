@@ -1,7 +1,9 @@
 const { verifyNostrEvent, npubToPubkey } = require('./nostrVerify');
 
 const BUNDLE_ATTESTATION_KIND = 27235;
+const BUNDLE_ATTESTATION_COMPAT_KIND = 1;
 const BUNDLE_ATTESTATION_SCOPE = 'byzantine-signal-bundle-v1';
+const BUNDLE_ATTESTATION_COMPAT_CLIENT = '/guild';
 
 function normalizeSignedPreKey(signedPreKey) {
   return {
@@ -28,11 +30,20 @@ function hasBundleScopeTag(tags) {
   );
 }
 
+function hasCompatClientTag(tags) {
+  return Array.isArray(tags) && tags.some(tag =>
+    Array.isArray(tag) &&
+    tag[0] === 'client' &&
+    tag[1] === BUNDLE_ATTESTATION_COMPAT_CLIENT
+  );
+}
+
 function verifyBundleAttestationEvent(event, bundle, expectedNpub = null) {
   if (!event || typeof event !== 'object') return false;
   if (!verifyNostrEvent(event)) return false;
-  if (event.kind !== BUNDLE_ATTESTATION_KIND) return false;
+  if (![BUNDLE_ATTESTATION_KIND, BUNDLE_ATTESTATION_COMPAT_KIND].includes(event.kind)) return false;
   if (!hasBundleScopeTag(event.tags)) return false;
+  if (event.kind === BUNDLE_ATTESTATION_COMPAT_KIND && !hasCompatClientTag(event.tags)) return false;
   if (event.content !== buildBundleAttestationPayload(bundle)) return false;
 
   if (expectedNpub) {
@@ -48,6 +59,7 @@ function verifyBundleAttestationEvent(event, bundle, expectedNpub = null) {
 
 module.exports = {
   BUNDLE_ATTESTATION_KIND,
+  BUNDLE_ATTESTATION_COMPAT_KIND,
   BUNDLE_ATTESTATION_SCOPE,
   buildBundleAttestationPayload,
   verifyBundleAttestationEvent,

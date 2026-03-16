@@ -1,4 +1,4 @@
-import { createContext, useContext } from 'react';
+import { createContext, useContext, useMemo } from 'react';
 import { useAuth } from './AuthContext';
 
 const SecurityContext = createContext(null);
@@ -14,12 +14,14 @@ export function SecurityProvider({ children }) {
         ? 'blocked'
         : 'booting';
 
+  const value = useMemo(() => ({
+    securityState,
+    cryptoError,
+    retryCryptoInitialization,
+  }), [securityState, cryptoError, retryCryptoInitialization]);
+
   return (
-    <SecurityContext.Provider value={{
-      securityState,
-      cryptoError,
-      retryCryptoInitialization,
-    }}>
+    <SecurityContext.Provider value={value}>
       {children}
     </SecurityContext.Provider>
   );

@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { fetchCurrentProfile } from '../../nostr/profilePublisher';
 import { getUserPubkey } from '../../utils/nostrConnect';
 import { useAuth } from '../../contexts/AuthContext';
@@ -10,6 +10,8 @@ import { getFileUrl } from '../../api';
 import { nip19 } from 'nostr-tools';
 import Avatar from '../Common/Avatar';
 import GuildSettingsModal from '../Guild/GuildSettingsModal';
+import ProfileSettingsModal from '../Profile/ProfileSettingsModal';
+import { startPerfTrace } from '../../utils/devPerf';
 
 export default function NostrProfileView() {
   const { user, logout } = useAuth();
@@ -28,6 +30,18 @@ export default function NostrProfileView() {
 
   // Guild settings modal
   const [showGuildSettings, setShowGuildSettings] = useState(false);
+  const [guildSettingsOpenTraceId, setGuildSettingsOpenTraceId] = useState(null);
+  const [showProfileEditor, setShowProfileEditor] = useState(false);
+  const closeGuildSettings = useCallback(() => {
+    setShowGuildSettings(false);
+    setGuildSettingsOpenTraceId(null);
+  }, []);
+  const openGuildSettings = useCallback(() => {
+    setGuildSettingsOpenTraceId(startPerfTrace('guild-settings-open', {
+      surface: 'nostr-profile',
+    }));
+    setShowGuildSettings(true);
+  }, []);
 
   // Confirm dialog
   const [confirmDialog, setConfirmDialog] = useState(null);
@@ -44,20 +58,29 @@ export default function NostrProfileView() {
     return pk;
   };
 
+  const loadProfile = useCallback(async () => {
+    const pk = getPk();
+    if (!pk) {
+      setProfile(null);
+      setLoading(false);
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const prof = await fetchCurrentProfile(pk);
+      setProfile(prof);
+    } catch {
+      // Ignore relay errors here; the page can still render from local auth state.
+    } finally {
+      setLoading(false);
+    }
+  }, [user?.npub]);
+
   // Fetch Nostr profile on mount (read-only)
   useEffect(() => {
-    let cancelled = false;
-    const pk = getPk();
-    if (!pk) { setLoading(false); return; }
-
-    fetchCurrentProfile(pk).then(prof => {
-      if (!cancelled) setProfile(prof);
-    }).catch(() => {}).finally(() => {
-      if (!cancelled) setLoading(false);
-    });
-
-    return () => { cancelled = true; };
-  }, [user]);
+    loadProfile().catch(() => {});
+  }, [loadProfile]);
 
   // Derive current status from online users
   const me = onlineUsers.find(u => u.userId === user?.userId);
@@ -109,9 +132,11 @@ export default function NostrProfileView() {
     });
   };
 
-  const displayName = profile?.name || profile?.display_name || user?.username || 'Anonymous';
-  const picture = profile?.picture || user?.profilePicture || '';
-  const about = profile?.about || '';
+  const displayName = profile
+    ? (profile.name || profile.display_name || user?.username || 'Anonymous')
+    : (user?.username || 'Anonymous');
+  const picture = profile ? (profile.picture || '') : (user?.profilePicture || '');
+  const about = profile ? (profile.about || '') : '';
 
   return (
     <>
@@ -148,19 +173,33 @@ export default function NostrProfileView() {
                 <p style={styles.aboutText}>{about}</p>
               ) : null}
 
-              <button
-                onClick={() => window.electronAPI?.openExternal(`https://primal.net/p/${npub}`)}
-                style={styles.primalBtn}
-                onMouseEnter={e => { e.currentTarget.style.borderColor = 'var(--accent)'; e.currentTarget.style.color = 'var(--text-primary)'; }}
-                onMouseLeave={e => { e.currentTarget.style.borderColor = 'var(--border)'; e.currentTarget.style.color = 'var(--text-secondary)'; }}
-              >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
-                  <polyline points="15 3 21 3 21 9" />
-                  <line x1="10" y1="14" x2="21" y2="3" />
-                </svg>
-                View on Primal
-              </button>
+              <div style={styles.profileActions}>
+                <button
+                  onClick={() => setShowProfileEditor(true)}
+                  style={styles.editProfileBtn}
+                  onMouseEnter={e => { e.currentTarget.style.borderColor = 'var(--accent)'; e.currentTarget.style.color = 'var(--text-primary)'; }}
+                  onMouseLeave={e => { e.currentTarget.style.borderColor = 'var(--border)'; e.currentTarget.style.color = 'var(--text-secondary)'; }}
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M12 20h9" />
+                    <path d="M16.5 3.5a2.12 2.12 0 1 1 3 3L7 19l-4 1 1-4Z" />
+                  </svg>
+                  Edit Profile
+                </button>
+                <button
+                  onClick={() => window.electronAPI?.openExternal(`https://primal.net/p/${npub}`)}
+                  style={styles.primalBtn}
+                  onMouseEnter={e => { e.currentTarget.style.borderColor = 'var(--accent)'; e.currentTarget.style.color = 'var(--text-primary)'; }}
+                  onMouseLeave={e => { e.currentTarget.style.borderColor = 'var(--border)'; e.currentTarget.style.color = 'var(--text-secondary)'; }}
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+                    <polyline points="15 3 21 3 21 9" />
+                    <line x1="10" y1="14" x2="21" y2="3" />
+                  </svg>
+                  View on Primal
+                </button>
+              </div>
             </div>
 
             {/* Guild Info Card */}
@@ -216,7 +255,7 @@ export default function NostrProfileView() {
               <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
                 {currentGuild && (
                   <button
-                    onClick={() => setShowGuildSettings(true)}
+                    onClick={openGuildSettings}
                     style={styles.settingsBtn}
                     onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.04)'}
                     onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
@@ -267,7 +306,17 @@ export default function NostrProfileView() {
       )}
 
       {showGuildSettings && (
-        <GuildSettingsModal onClose={() => setShowGuildSettings(false)} />
+        <GuildSettingsModal onClose={closeGuildSettings} openTraceId={guildSettingsOpenTraceId} />
+      )}
+
+      {showProfileEditor && (
+        <ProfileSettingsModal
+          onClose={() => setShowProfileEditor(false)}
+          onSaved={(nextProfile) => {
+            setProfile(nextProfile);
+            setShowProfileEditor(false);
+          }}
+        />
       )}
 
       {/* Confirm dialog */}
@@ -361,6 +410,25 @@ const styles = {
     margin: '0 0 12px',
     lineHeight: 1.6,
     wordBreak: 'break-word',
+  },
+  profileActions: {
+    display: 'flex',
+    gap: 10,
+    flexWrap: 'wrap',
+  },
+  editProfileBtn: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 6,
+    padding: '8px 16px',
+    borderRadius: 8,
+    border: '1px solid var(--border)',
+    background: 'transparent',
+    color: 'var(--text-secondary)',
+    fontSize: 13,
+    fontWeight: 500,
+    cursor: 'pointer',
+    transition: 'border-color 0.15s, color 0.15s',
   },
   primalBtn: {
     display: 'flex',

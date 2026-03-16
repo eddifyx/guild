@@ -1,6 +1,6 @@
 import { useRef, useEffect } from 'react';
 import { useAuth } from '../../contexts/AuthContext';
-import { useVoiceContext } from '../../contexts/VoiceContext';
+import { useVoiceContext, useVoicePresenceContext } from '../../contexts/VoiceContext';
 
 function StreamVideo({ stream, muted = false }) {
   const videoRef = useRef(null);
@@ -63,7 +63,8 @@ function NoStreamPlaceholder() {
 
 export default function StreamView({ userId }) {
   const { user } = useAuth();
-  const { screenSharing, screenShareStream, incomingScreenShares, voiceChannels, channelId, peers } = useVoiceContext();
+  const { screenSharing, screenShareStream, incomingScreenShares, voiceChannels, channelId } = useVoiceContext();
+  const { peers } = useVoicePresenceContext();
 
   const isOwnStream = userId && userId === user.userId;
   const activePeerStreamerId = !screenSharing

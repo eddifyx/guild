@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, useCallback, useEffect } from 'react';
+import { createContext, useContext, useState, useCallback, useEffect, useMemo } from 'react';
 import { api } from '../api';
 import { useSocket } from './SocketContext';
 import { rememberUsers } from '../crypto/identityDirectory.js';
@@ -112,16 +112,26 @@ export function GuildProvider({ children }) {
     }
   }, [currentGuildData]);
 
+  const value = useMemo(() => ({
+    myGuild,
+    currentGuild,
+    currentGuildData,
+    loading,
+    clearGuild,
+    fetchMyGuild,
+    fetchGuildDetails,
+  }), [
+    myGuild,
+    currentGuild,
+    currentGuildData,
+    loading,
+    clearGuild,
+    fetchMyGuild,
+    fetchGuildDetails,
+  ]);
+
   return (
-    <GuildContext.Provider value={{
-      myGuild,
-      currentGuild,
-      currentGuildData,
-      loading,
-      clearGuild,
-      fetchMyGuild,
-      fetchGuildDetails,
-    }}>
+    <GuildContext.Provider value={value}>
       {children}
     </GuildContext.Provider>
   );

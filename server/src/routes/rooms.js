@@ -6,6 +6,10 @@ const {
   removeRoomMember, getRoomMembers, getUserRooms, isRoomMember,
   renameRoom, deleteRoomRow, deleteRoomMembers, deleteRoomAttachments, deleteRoomMessages,
   getAllUsers, isGuildMember, getGuildMembers,
+  getPendingSenderKeyDistributionsForRecipientInRoom,
+  acknowledgeSenderKeyDistributions,
+  deleteSenderKeyDistributionsForRoom,
+  deleteSenderKeyDistributionsForRecipientInRoom,
 } = require('../db');
 
 const router = express.Router();
@@ -95,6 +99,7 @@ router.post('/:id/join', auth, (req, res) => {
 
 router.post('/:id/leave', auth, (req, res) => {
   removeRoomMember.run(req.params.id, req.userId);
+  deleteSenderKeyDistributionsForRecipientInRoom.run(req.params.id, req.userId);
 
   // Broadcast member removal so remaining members re-key their sender keys
   if (router._io) {
@@ -115,6 +120,34 @@ router.get('/:id/members', auth, (req, res) => {
   if (!member) return res.status(403).json({ error: 'Not a member of this room' });
   const members = getRoomMembers.all(req.params.id);
   res.json(members);
+});
+
+router.get('/:id/sender-keys', auth, (req, res) => {
+  const member = isRoomMember.get(req.params.id, req.userId);
+  if (!member) return res.status(403).json({ error: 'Not a member of this room' });
+
+  const pending = getPendingSenderKeyDistributionsForRecipientInRoom.all(req.userId, req.params.id);
+  res.json(pending.map((entry) => ({
+    id: entry.id,
+    roomId: entry.room_id,
+    fromUserId: entry.sender_user_id,
+    distributionId: entry.distribution_id,
+    envelope: entry.envelope,
+    senderNpub: entry.sender_npub || null,
+    createdAt: entry.created_at,
+  })));
+});
+
+router.post('/:id/sender-keys/ack', auth, (req, res) => {
+  const ids = Array.isArray(req.body?.ids)
+    ? req.body.ids.filter((value) => typeof value === 'string').slice(0, 100)
+    : [];
+  if (ids.length === 0) {
+    return res.status(400).json({ error: 'Sender key IDs are required' });
+  }
+
+  const acknowledged = acknowledgeSenderKeyDistributions(req.userId, req.params.id, ids);
+  res.json({ ok: true, acknowledged });
 });
 
 // Rename room (creator only)
@@ -163,6 +196,7 @@ router.delete('/:id', auth, (req, res) => {
   const deleteRoom = db.transaction((roomId) => {
     deleteRoomAttachments.run(roomId);
     deleteRoomMessages.run(roomId);
+    deleteSenderKeyDistributionsForRoom.run(roomId);
     deleteRoomMembers.run(roomId);
     deleteRoomRow.run(roomId);
   });
