@@ -2,6 +2,68 @@ import { useRef, useEffect } from 'react';
 import { useAuth } from '../../contexts/AuthContext';
 import { useVoiceContext, useVoicePresenceContext } from '../../contexts/VoiceContext';
 
+function formatResolution(width, height) {
+  if (!width || !height) return '—';
+  return `${width}x${height}`;
+}
+
+function formatFps(value) {
+  if (typeof value !== 'number' || Number.isNaN(value)) return '—';
+  return `${Math.round(value * 10) / 10} fps`;
+}
+
+function formatKbps(value) {
+  if (typeof value !== 'number' || Number.isNaN(value)) return '—';
+  return `${Math.round(value)} kbps`;
+}
+
+function ScreenShareStatsOverlay({ diagnostics }) {
+  if (!diagnostics?.active) return null;
+
+  const captureSettings = diagnostics.captureTrack?.settings || {};
+  const senderStats = diagnostics.sender || {};
+  const outboundVideo = senderStats.outboundVideo || {};
+
+  return (
+    <div style={{
+      position: 'absolute',
+      top: 12,
+      right: 12,
+      zIndex: 3,
+      minWidth: 220,
+      padding: '10px 12px',
+      borderRadius: 10,
+      background: 'rgba(5, 7, 5, 0.78)',
+      border: '1px solid rgba(64, 255, 64, 0.22)',
+      backdropFilter: 'blur(8px)',
+      color: '#d8ffe0',
+      display: 'grid',
+      gap: 6,
+      fontSize: 11,
+      lineHeight: 1.35,
+      boxShadow: '0 10px 30px rgba(0, 0, 0, 0.35)',
+    }}>
+      <div style={{
+        fontSize: 10,
+        fontWeight: 700,
+        textTransform: 'uppercase',
+        letterSpacing: '0.9px',
+        color: '#8cff9c',
+      }}>
+        Screen Share Stats
+      </div>
+      <div style={{ display: 'grid', gap: 3, fontVariantNumeric: 'tabular-nums' }}>
+        <div>Target: {diagnostics.requestedCapture?.minimumResolution || '—'} @ {diagnostics.requestedCapture?.targetFps || '—'}fps</div>
+        <div>Captured: {formatResolution(captureSettings.width, captureSettings.height)} @ {formatFps(captureSettings.frameRate)}</div>
+        <div>Sent: {formatResolution(outboundVideo.frameWidth, outboundVideo.frameHeight)} @ {formatFps(outboundVideo.framesPerSecond)}</div>
+        <div>Bitrate: {formatKbps(senderStats.outgoingBitrateKbps)}</div>
+        <div>RTT: {senderStats.remoteInboundVideo?.roundTripTimeMs ?? senderStats.candidatePair?.currentRoundTripTimeMs ?? '—'} ms</div>
+        <div>Limitation: {outboundVideo.qualityLimitationReason || 'none'}</div>
+      </div>
+    </div>
+  );
+}
+
 function StreamVideo({ stream, muted = false }) {
   const videoRef = useRef(null);
   useEffect(() => {
@@ -63,7 +125,7 @@ function NoStreamPlaceholder() {
 
 export default function StreamView({ userId }) {
   const { user } = useAuth();
-  const { screenSharing, screenShareStream, incomingScreenShares, voiceChannels, channelId } = useVoiceContext();
+  const { screenSharing, screenShareStream, screenShareDiagnostics, incomingScreenShares, voiceChannels, channelId } = useVoiceContext();
   const { peers } = useVoicePresenceContext();
 
   const isOwnStream = userId && userId === user.userId;
@@ -102,9 +164,12 @@ export default function StreamView({ userId }) {
       return <NoStreamPlaceholder />;
     }
     return (
-      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', background: '#000', minHeight: 0 }}>
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', background: '#000', minHeight: 0, position: 'relative' }}>
         {screenShareStream ? (
-          <StreamVideo stream={screenShareStream} muted />
+          <>
+            <StreamVideo stream={screenShareStream} muted />
+            <ScreenShareStatsOverlay diagnostics={screenShareDiagnostics} />
+          </>
         ) : (
           <div style={placeholderStyle}>
             {monitorIcon(48)}

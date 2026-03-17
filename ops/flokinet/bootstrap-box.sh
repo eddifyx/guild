@@ -15,7 +15,7 @@ Dry-run by default. This bootstraps a FlokiNET Ubuntu box for `/guild` by:
 - installing base packages
 - installing Node 24
 - creating the `guild` system user
-- creating /opt/guild and /etc/guild
+- creating both production and staging app roots plus /etc/guild
 
 Options:
   --host HOST        Remote server IP or hostname
@@ -91,9 +91,15 @@ if ! id -u guild >/dev/null 2>&1; then
   sudo adduser --system --group --home /opt/guild guild
 fi
 
-sudo mkdir -p /opt/guild/client /opt/guild/server /opt/guild/uploads /opt/guild/updates /etc/guild
-sudo chown -R guild:guild /opt/guild /etc/guild
-sudo chmod 755 /opt/guild /opt/guild/client /opt/guild/server /opt/guild/uploads /opt/guild/updates /etc/guild
+sudo mkdir -p \
+  /opt/guild/client /opt/guild/server /opt/guild/uploads /opt/guild/updates \
+  /opt/guild-staging/client /opt/guild-staging/server /opt/guild-staging/uploads /opt/guild-staging/updates \
+  /etc/guild
+sudo chown -R guild:guild /opt/guild /opt/guild-staging /etc/guild
+sudo chmod 755 \
+  /opt/guild /opt/guild/client /opt/guild/server /opt/guild/uploads /opt/guild/updates \
+  /opt/guild-staging /opt/guild-staging/client /opt/guild-staging/server /opt/guild-staging/uploads /opt/guild-staging/updates \
+  /etc/guild
 
 if [[ "$WITH_FIREWALL" -eq 1 ]]; then
   sudo ufw default deny incoming
@@ -101,8 +107,8 @@ if [[ "$WITH_FIREWALL" -eq 1 ]]; then
   sudo ufw allow 22/tcp
   sudo ufw allow 80/tcp
   sudo ufw allow 443/tcp
-  sudo ufw allow 10000:10100/udp
-  sudo ufw allow 10000:10100/tcp
+  sudo ufw allow 10000:10200/udp
+  sudo ufw allow 10000:10200/tcp
   sudo ufw --force enable
 fi
 

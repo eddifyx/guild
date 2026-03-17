@@ -1,11 +1,21 @@
 const mediasoup = require('mediasoup');
 const os = require('os');
 
+const RTC_MIN_PORT = Number(process.env.MEDIASOUP_RTC_MIN_PORT || 10000);
+const RTC_MAX_PORT = Number(process.env.MEDIASOUP_RTC_MAX_PORT || 10100);
+
+if (!Number.isInteger(RTC_MIN_PORT) || !Number.isInteger(RTC_MAX_PORT) || RTC_MIN_PORT <= 0 || RTC_MAX_PORT < RTC_MIN_PORT) {
+  throw new Error(`Invalid mediasoup RTP port range: ${RTC_MIN_PORT}-${RTC_MAX_PORT}`);
+}
+
 const WORKER_SETTINGS = {
   logLevel: 'warn',
-  rtcMinPort: 10000,
-  rtcMaxPort: 10100,
+  rtcMinPort: RTC_MIN_PORT,
+  rtcMaxPort: RTC_MAX_PORT,
 };
+const INITIAL_AVAILABLE_OUTGOING_BITRATE = Number(
+  process.env.MEDIASOUP_INITIAL_OUTGOING_BITRATE || 18_000_000
+);
 
 function isPrivateIpv4(address) {
   if (typeof address !== 'string') return false;
@@ -63,7 +73,7 @@ const WEBRTC_TRANSPORT_OPTIONS = {
   enableUdp: true,
   enableTcp: true,
   preferUdp: true,
-  initialAvailableOutgoingBitrate: 3000000,
+  initialAvailableOutgoingBitrate: INITIAL_AVAILABLE_OUTGOING_BITRATE,
 };
 
 const workers = [];

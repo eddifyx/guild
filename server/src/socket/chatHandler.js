@@ -169,7 +169,7 @@ function handleChat(io, socket) {
     ack({ ok: true });
   }));
 
-  socket.on('room:message', safe(({ roomId, content, attachments, encrypted }, ack) => {
+  socket.on('room:message', safe(({ roomId, content, attachments, encrypted, clientNonce }, ack) => {
     if (!roomId) return ack({ ok: false, error: 'Room ID required' });
     if (!checkRate(_rl.messages, SOCKET_RL_MAX_MESSAGES)) return ack({ ok: false, error: 'Rate limit exceeded' });
     if (content && typeof content === 'string' && content.length > MAX_CONTENT_LENGTH) {
@@ -188,6 +188,10 @@ function handleChat(io, socket) {
     if (Array.isArray(attachments) && safeAttachments.length !== attachments.slice(0, MAX_ATTACHMENTS).length) {
       return ack({ ok: false, error: 'Invalid attachment reference' });
     }
+
+    const safeClientNonce = typeof clientNonce === 'string' && clientNonce.length <= 128
+      ? clientNonce
+      : null;
 
     const msgId = uuidv4();
     let savedAttachments;
@@ -220,6 +224,7 @@ function handleChat(io, socket) {
       attachments: savedAttachments,
       created_at: stored ? stored.created_at : new Date().toISOString().replace('T', ' ').slice(0, 19),
       encrypted: encrypted ? 1 : 0,
+      client_nonce: safeClientNonce,
     };
 
     io.to(`room:${roomId}`).emit('room:message', message);
@@ -228,10 +233,10 @@ function handleChat(io, socket) {
       encrypted: !!encrypted,
       attachmentCount: savedAttachments.length,
     });
-    ack({ ok: true, messageId: msgId });
+    ack({ ok: true, messageId: msgId, clientNonce: safeClientNonce });
   }));
 
-  socket.on('dm:message', safe(({ toUserId, content, attachments, encrypted }, ack) => {
+  socket.on('dm:message', safe(({ toUserId, content, attachments, encrypted, clientNonce }, ack) => {
     if (!toUserId) return ack({ ok: false, error: 'Recipient required' });
     if (!checkRate(_rl.messages, SOCKET_RL_MAX_MESSAGES)) return ack({ ok: false, error: 'Rate limit exceeded' });
     if (content && typeof content === 'string' && content.length > MAX_CONTENT_LENGTH) {
@@ -254,6 +259,10 @@ function handleChat(io, socket) {
     if (Array.isArray(attachments) && safeAttachments.length !== attachments.slice(0, MAX_ATTACHMENTS).length) {
       return ack({ ok: false, error: 'Invalid attachment reference' });
     }
+
+    const safeClientNonce = typeof clientNonce === 'string' && clientNonce.length <= 128
+      ? clientNonce
+      : null;
 
     const msgId = uuidv4();
     let savedAttachments;
@@ -286,6 +295,7 @@ function handleChat(io, socket) {
       attachments: savedAttachments,
       created_at: stored ? stored.created_at : new Date().toISOString().replace('T', ' ').slice(0, 19),
       encrypted: encrypted ? 1 : 0,
+      client_nonce: safeClientNonce,
     };
 
     io.to(`user:${toUserId}`).emit('dm:message', message);
@@ -295,7 +305,7 @@ function handleChat(io, socket) {
       encrypted: !!encrypted,
       attachmentCount: savedAttachments.length,
     });
-    ack({ ok: true, messageId: msgId });
+    ack({ ok: true, messageId: msgId, clientNonce: safeClientNonce });
   }));
 
   socket.on('dm:sender_key', safe(({ toUserId, envelope, roomId = null, distributionId = null }, ack) => {

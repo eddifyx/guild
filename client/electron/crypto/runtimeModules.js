@@ -6,10 +6,26 @@ function getVendorNodeModulesPath() {
   return path.join(process.resourcesPath, 'vendor', 'node_modules');
 }
 
+function getPackagedNodeModulesPaths() {
+  const locations = [];
+
+  if (process.resourcesPath) {
+    locations.push(getVendorNodeModulesPath());
+    locations.push(path.join(process.resourcesPath, 'app.asar.unpacked', 'vendor', 'node_modules'));
+  }
+
+  return locations;
+}
+
 function getPackagedModulePath(packageName) {
-  if (!process.resourcesPath) return null;
-  const packagedModulePath = path.join(getVendorNodeModulesPath(), ...packageName.split('/'));
-  return fs.existsSync(packagedModulePath) ? packagedModulePath : null;
+  for (const nodeModulesPath of getPackagedNodeModulesPaths()) {
+    const packagedModulePath = path.join(nodeModulesPath, ...packageName.split('/'));
+    if (fs.existsSync(packagedModulePath)) {
+      return packagedModulePath;
+    }
+  }
+
+  return null;
 }
 
 function requireRuntimeModule(packageName) {
@@ -21,9 +37,6 @@ function requireRuntimeModule(packageName) {
   try {
     return require(packageName);
   } catch (error) {
-    if (!process.resourcesPath) {
-      throw error;
-    }
     throw error;
   }
 }
@@ -37,9 +50,6 @@ function resolveRuntimePackageRoot(packageName) {
   try {
     return path.dirname(require.resolve(`${packageName}/package.json`));
   } catch (error) {
-    if (!process.resourcesPath) {
-      throw error;
-    }
     throw error;
   }
 }
@@ -47,10 +57,10 @@ function resolveRuntimePackageRoot(packageName) {
 async function importLibsignalModule() {
   const libsignalRoot = resolveRuntimePackageRoot('@signalapp/libsignal-client');
   const originalCwd = process.cwd();
+  const entryUrl = pathToFileURL(path.join(libsignalRoot, 'dist', 'index.js')).href;
 
   process.chdir(libsignalRoot);
   try {
-    const entryUrl = pathToFileURL(path.join(libsignalRoot, 'dist', 'index.js')).href;
     return await import(entryUrl);
   } finally {
     process.chdir(originalCwd);

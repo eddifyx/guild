@@ -61,6 +61,15 @@ import { hasKnownNpub, rememberUsers } from '../crypto/identityDirectory.js';
 const MAC_SCREEN_CAPTURE_PERMISSION_MESSAGE = 'Screen sharing needs macOS Screen Recording permission. Open System Settings > Privacy & Security > Screen & System Audio Recording and enable /guild, then fully restart the app.';
 const RNNOISE_SEND_MAKEUP_GAIN = 2.4;
 const APPLE_VOICE_LIVE_START_TIMEOUT_MS = 3200;
+const SCREEN_SHARE_CAPTURE_IDEAL_WIDTH = 2560;
+const SCREEN_SHARE_CAPTURE_IDEAL_HEIGHT = 1440;
+const SCREEN_SHARE_TARGET_WIDTH = 1920;
+const SCREEN_SHARE_TARGET_HEIGHT = 1080;
+const SCREEN_SHARE_TARGET_FPS = 30;
+const SCREEN_SHARE_CAPTURE_MAX_FPS = 60;
+const SCREEN_SHARE_MAX_BITRATE = 24_000_000;
+const SCREEN_SHARE_MIN_BITRATE_KBPS = 3000;
+const SCREEN_SHARE_START_BITRATE_KBPS = 12_000;
 
 function applyNoiseSuppressionRoutingTo(routing, enabled) {
   if (!routing) {
@@ -75,12 +84,52 @@ function applyNoiseSuppressionRoutingTo(routing, enabled) {
 }
 
 function areVoiceDiagnosticsEnabled() {
-  return false;
+  return Boolean(import.meta.env.DEV);
 }
 
 function roundMs(value) {
   if (typeof value !== 'number' || Number.isNaN(value)) return null;
   return Math.round(value * 10) / 10;
+}
+
+function roundRate(value, decimals = 1) {
+  if (typeof value !== 'number' || Number.isNaN(value)) return null;
+  const factor = 10 ** decimals;
+  return Math.round(value * factor) / factor;
+}
+
+function formatResolution(width, height) {
+  if (!width || !height) return null;
+  return `${width}x${height}`;
+}
+
+async function applyPreferredScreenShareConstraints(videoTrack) {
+  if (!videoTrack?.applyConstraints) return;
+
+  const attempts = [
+    {
+      width: { ideal: SCREEN_SHARE_CAPTURE_IDEAL_WIDTH, min: SCREEN_SHARE_TARGET_WIDTH },
+      height: { ideal: SCREEN_SHARE_CAPTURE_IDEAL_HEIGHT, min: SCREEN_SHARE_TARGET_HEIGHT },
+      frameRate: { ideal: SCREEN_SHARE_TARGET_FPS, min: 24, max: SCREEN_SHARE_CAPTURE_MAX_FPS },
+    },
+    {
+      width: { ideal: SCREEN_SHARE_TARGET_WIDTH },
+      height: { ideal: SCREEN_SHARE_TARGET_HEIGHT },
+      frameRate: { ideal: SCREEN_SHARE_TARGET_FPS, min: 24, max: SCREEN_SHARE_TARGET_FPS },
+    },
+    {
+      width: SCREEN_SHARE_TARGET_WIDTH,
+      height: SCREEN_SHARE_TARGET_HEIGHT,
+      frameRate: SCREEN_SHARE_TARGET_FPS,
+    },
+  ];
+
+  for (const constraints of attempts) {
+    try {
+      await videoTrack.applyConstraints(constraints);
+      return;
+    } catch {}
+  }
 }
 
 function normalizeVoiceErrorMessage(error) {
@@ -168,6 +217,7 @@ export function useVoice() {
   const [screenShareStream, setScreenShareStream] = useState(null);
   const [screenShareError, setScreenShareError] = useState(null);
   const [incomingScreenShares, setIncomingScreenShares] = useState([]); // [{ userId, stream }]
+  const [screenShareDiagnostics, setScreenShareDiagnostics] = useState(null);
   const [showSourcePicker, setShowSourcePicker] = useState(false);
   const [voiceE2E, setVoiceE2E] = useState(false); // Whether voice E2E encryption is active
   const [e2eWarning, setE2EWarning] = useState(null); // Warning message when E2E fails
@@ -178,6 +228,7 @@ export function useVoice() {
     session: null,
     liveCapture: null,
     senderStats: null,
+    screenShare: null,
     consumers: {},
   }));
 
@@ -218,6 +269,7 @@ export function useVoice() {
   const voiceProcessingModeRef = useRef(voiceProcessingMode);
   const liveCaptureRef = useRef(null);
   const liveCaptureConfigGenRef = useRef(0);
+  const screenShareStatsRef = useRef(null);
 
   const applyNoiseSuppressionRouting = useCallback((enabled) => {
     return applyNoiseSuppressionRoutingTo(noiseSuppressionRoutingRef.current, enabled);
@@ -1305,6 +1357,8 @@ export function useVoice() {
     setScreenSharing(false);
     setScreenShareStream(null);
     setScreenShareError(null);
+    screenShareStatsRef.current = null;
+    setScreenShareDiagnostics(null);
     screenShareVideosRef.current.clear();
     setIncomingScreenShares([]);
 
@@ -1339,7 +1393,10 @@ export function useVoice() {
     deviceRef.current = null;
     liveCaptureRef.current = null;
     participantIdsRef.current = [];
+    channelIdRef.current = null;
+    setChannelId(null);
     clearVoiceKey();
+    setVoiceChannelId(null);
     setVoiceChannelParticipants([]);
     setJoinError(null);
     setVoiceE2E(false);
@@ -1354,6 +1411,7 @@ export function useVoice() {
         endedAt: new Date().toISOString(),
       },
       senderStats: null,
+      screenShare: null,
       consumers: {},
     }));
 
@@ -1361,7 +1419,6 @@ export function useVoice() {
       try { await emitAsync('voice:leave', { channelId: targetChannelId }); } catch {}
     }
 
-    setChannelId(null);
     setMuted(false);
     setDeafened(false);
     setSpeaking(false);
@@ -2164,22 +2221,63 @@ export function useVoice() {
       }
 
       const stream = await navigator.mediaDevices.getDisplayMedia({
-        video: { width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 60 } },
+        video: {
+          width: { ideal: SCREEN_SHARE_CAPTURE_IDEAL_WIDTH, min: 1280 },
+          height: { ideal: SCREEN_SHARE_CAPTURE_IDEAL_HEIGHT, min: 720 },
+          frameRate: { ideal: SCREEN_SHARE_TARGET_FPS, min: 24, max: SCREEN_SHARE_CAPTURE_MAX_FPS },
+        },
         audio: includeAudio && !macAudioDeviceId,
       });
       screenShareStreamRef.current = stream;
       setScreenShareStream(stream);
 
       const videoTrack = stream.getVideoTracks()[0];
-      videoTrack.contentHint = 'motion';
+      if (!videoTrack) {
+        throw new Error('Screen capture did not provide a video track.');
+      }
+      await applyPreferredScreenShareConstraints(videoTrack);
+      try {
+        videoTrack.contentHint = 'detail';
+      } catch {
+        videoTrack.contentHint = 'text';
+      }
       videoTrack.onended = () => {
         stopScreenShareRef.current?.();
       };
+      setScreenShareDiagnostics({
+        active: true,
+        startedAt: new Date().toISOString(),
+        requestedCapture: {
+          idealResolution: formatResolution(SCREEN_SHARE_CAPTURE_IDEAL_WIDTH, SCREEN_SHARE_CAPTURE_IDEAL_HEIGHT),
+          minimumResolution: formatResolution(SCREEN_SHARE_TARGET_WIDTH, SCREEN_SHARE_TARGET_HEIGHT),
+          targetFps: SCREEN_SHARE_TARGET_FPS,
+          captureFpsCeiling: SCREEN_SHARE_CAPTURE_MAX_FPS,
+          maxBitrate: SCREEN_SHARE_MAX_BITRATE,
+          startBitrateKbps: SCREEN_SHARE_START_BITRATE_KBPS,
+          minBitrateKbps: SCREEN_SHARE_MIN_BITRATE_KBPS,
+        },
+        sourceId: sourceId || null,
+        includeAudio,
+        captureTrack: summarizeTrackSnapshot(videoTrack),
+        sender: null,
+        sampledAt: null,
+      });
 
       const producer = await sendTransport.produce({
         track: videoTrack,
-        encodings: [{ maxBitrate: 8_000_000, maxFramerate: 60 }],
-        codecOptions: { videoGoogleStartBitrate: 3000 },
+        encodings: [{
+          maxBitrate: SCREEN_SHARE_MAX_BITRATE,
+          maxFramerate: SCREEN_SHARE_TARGET_FPS,
+          scaleResolutionDownBy: 1,
+          priority: 'high',
+          networkPriority: 'high',
+          scalabilityMode: 'L1T2',
+        }],
+        codecOptions: {
+          videoGoogleStartBitrate: SCREEN_SHARE_START_BITRATE_KBPS,
+          videoGoogleMinBitrate: SCREEN_SHARE_MIN_BITRATE_KBPS,
+          videoGoogleMaxBitrate: Math.round(SCREEN_SHARE_MAX_BITRATE / 1000),
+        },
         appData: { source: 'screen-video' },
       });
       screenShareProducerRef.current = producer;
@@ -2212,6 +2310,43 @@ export function useVoice() {
       const videoSender = producer.rtpSender;
       if (!videoSender) {
         throw new Error('Screen sharing is unavailable because secure media transforms could not attach to video.');
+      }
+      if (videoSender.getParameters && videoSender.setParameters) {
+        try {
+          const parameters = videoSender.getParameters() || {};
+          parameters.degradationPreference = 'maintain-resolution';
+          if (Array.isArray(parameters.encodings) && parameters.encodings.length > 0) {
+            parameters.encodings = parameters.encodings.map((encoding) => ({
+              ...encoding,
+              maxBitrate: SCREEN_SHARE_MAX_BITRATE,
+              maxFramerate: SCREEN_SHARE_TARGET_FPS,
+              scaleResolutionDownBy: 1,
+              priority: 'high',
+              networkPriority: 'high',
+              scalabilityMode: encoding.scalabilityMode || 'L1T1',
+            }));
+          }
+          await videoSender.setParameters(parameters);
+          setScreenShareDiagnostics((prev) => prev ? {
+            ...prev,
+            senderParameters: {
+              degradationPreference: parameters.degradationPreference || null,
+              encodings: Array.isArray(parameters.encodings)
+                ? parameters.encodings.map((encoding) => ({
+                  active: encoding.active ?? null,
+                  maxBitrate: encoding.maxBitrate ?? null,
+                  maxFramerate: encoding.maxFramerate ?? null,
+                  scaleResolutionDownBy: encoding.scaleResolutionDownBy ?? null,
+                  scalabilityMode: encoding.scalabilityMode || null,
+                  priority: encoding.priority || null,
+                  networkPriority: encoding.networkPriority || null,
+                }))
+                : [],
+            },
+          } : prev);
+        } catch (senderParamErr) {
+          console.warn('[Voice] Failed to raise screen share sender parameters:', senderParamErr);
+        }
       }
       attachSenderEncryption(videoSender);
 
@@ -2291,6 +2426,8 @@ export function useVoice() {
     setScreenSharing(false);
     setScreenShareStream(null);
     setScreenShareError(null);
+    screenShareStatsRef.current = null;
+    setScreenShareDiagnostics(null);
     playStreamStopChime();
     if (channelIdRef.current && socket) {
       socket.emit('voice:screen-share-state', { channelId: channelIdRef.current, sharing: false });
@@ -2505,6 +2642,79 @@ export function useVoice() {
     };
   }, [channelId, updateVoiceDiagnostics]);
 
+  useEffect(() => {
+    if (!areVoiceDiagnosticsEnabled()) return;
+    updateVoiceDiagnostics((prev) => ({
+      ...prev,
+      screenShare: screenShareDiagnostics,
+    }));
+  }, [screenShareDiagnostics, updateVoiceDiagnostics]);
+
+  useEffect(() => {
+    if (!screenSharing) return;
+
+    let cancelled = false;
+
+    const pollScreenShareStats = async () => {
+      const producer = screenShareProducerRef.current;
+      const track = screenShareStreamRef.current?.getVideoTracks?.()?.[0] || null;
+      if (!producer || !track) return;
+
+      let senderStats = null;
+      try {
+        senderStats = summarizeProducerStats(await producer.getStats());
+      } catch {}
+
+      if (cancelled) return;
+
+      const sampledAt = new Date().toISOString();
+      const currentBytes = senderStats?.outboundVideo?.bytesSent ?? null;
+      const previousSample = screenShareStatsRef.current;
+      let outgoingBitrateKbps = null;
+      if (
+        previousSample
+        && currentBytes !== null
+        && previousSample.bytesSent !== null
+        && typeof previousSample.timestamp === 'number'
+      ) {
+        const elapsedMs = performance.now() - previousSample.timestamp;
+        if (elapsedMs > 0) {
+          outgoingBitrateKbps = roundRate(Math.max(0, ((currentBytes - previousSample.bytesSent) * 8) / elapsedMs), 1);
+        }
+      }
+
+      screenShareStatsRef.current = {
+        timestamp: performance.now(),
+        bytesSent: currentBytes,
+      };
+
+      setScreenShareDiagnostics((prev) => ({
+        active: true,
+        startedAt: prev?.startedAt || sampledAt,
+        requestedCapture: prev?.requestedCapture || null,
+        sourceId: prev?.sourceId || null,
+        includeAudio: prev?.includeAudio ?? false,
+        senderParameters: prev?.senderParameters || null,
+        captureTrack: summarizeTrackSnapshot(track),
+        sender: senderStats ? {
+          ...senderStats,
+          outgoingBitrateKbps,
+        } : null,
+        sampledAt,
+      }));
+    };
+
+    void pollScreenShareStats();
+    const intervalId = window.setInterval(() => {
+      void pollScreenShareStats();
+    }, 1500);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [screenSharing]);
+
   // Cleanup on unmount only ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â use ref to avoid re-running on leaveChannel identity change
   useEffect(() => {
     return () => {
@@ -2537,6 +2747,7 @@ export function useVoice() {
     toggleNoiseSuppression,
     screenSharing,
     screenShareStream,
+    screenShareDiagnostics,
     startScreenShare,
     stopScreenShare,
     incomingScreenShares,

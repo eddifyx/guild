@@ -7,6 +7,8 @@ const { VitePlugin } = require('@electron-forge/plugin-vite');
 // Vite externalizes these (can't bundle .node addons), and npm workspaces
 // hoists them to the monorepo root — so we copy them into the build manually.
 const NATIVE_DEPS = ['@signalapp/libsignal-client', 'better-sqlite3'];
+const RUNTIME_TRANSITIVE_DEPS = ['node-gyp-build', 'uuid', 'bindings', 'file-uri-to-path'];
+const PACKAGED_VENDOR_DEPS = ['@signalapp/libsignal-client', 'node-gyp-build', 'uuid'];
 const RUNTIME_SOURCE_DIRS = ['electron/crypto'];
 const APPLE_VOICE_HELPER_RELATIVE_DIR = path.join('electron', 'native', 'appleVoiceProcessing');
 const APPLE_VOICE_HELPER_SOURCE_NAME = 'AppleVoiceIsolationCapture.swift';
@@ -70,6 +72,10 @@ function copyDirSync(src, dest) {
   }
 }
 
+function removePathSync(targetPath) {
+  fs.rmSync(targetPath, { recursive: true, force: true });
+}
+
 function compileAppleVoiceHelper(sourceDir) {
   const sourcePath = path.join(sourceDir, APPLE_VOICE_HELPER_SOURCE_NAME);
   if (!fs.existsSync(sourcePath) || process.platform !== 'darwin') {
@@ -98,30 +104,47 @@ function compileAppleVoiceHelper(sourceDir) {
   fs.chmodSync(binaryPath, 0o755);
 }
 
-function copyRuntimeFilesIntoBuild(buildPath) {
+function copyRuntimePackagesIntoNodeModules(destinationNodeModules) {
   const rootModules = path.resolve(__dirname, 'node_modules');
-  const buildModules = path.join(buildPath, 'node_modules');
-  fs.mkdirSync(buildModules, { recursive: true });
+  fs.mkdirSync(destinationNodeModules, { recursive: true });
 
   for (const dep of NATIVE_DEPS) {
     const src = path.join(rootModules, dep);
-    const dest = path.join(buildModules, dep);
+    const dest = path.join(destinationNodeModules, dep);
     if (fs.existsSync(src)) {
       copyDirSync(src, dest);
     }
   }
 
   // Runtime transitive deps:
-  // libsignal-client needs: node-gyp-build (loads .node), uuid, type-fest
+  // libsignal-client needs: node-gyp-build (loads .node) and uuid
   // better-sqlite3 needs: bindings (loads .node), file-uri-to-path
-  const transitiveDeps = ['node-gyp-build', 'uuid', 'type-fest', 'bindings', 'file-uri-to-path'];
-  for (const dep of transitiveDeps) {
+  for (const dep of RUNTIME_TRANSITIVE_DEPS) {
     const src = path.join(rootModules, dep);
-    const dest = path.join(buildModules, dep);
+    const dest = path.join(destinationNodeModules, dep);
     if (fs.existsSync(src)) {
       copyDirSync(src, dest);
     }
   }
+}
+
+function copySelectedPackagesIntoNodeModules(destinationNodeModules, packageNames) {
+  const rootModules = path.resolve(__dirname, 'node_modules');
+  fs.mkdirSync(destinationNodeModules, { recursive: true });
+
+  for (const dep of packageNames) {
+    const src = path.join(rootModules, dep);
+    const dest = path.join(destinationNodeModules, dep);
+    if (fs.existsSync(src)) {
+      removePathSync(dest);
+      copyDirSync(src, dest);
+    }
+  }
+}
+
+function copyRuntimeFilesIntoBuild(buildPath) {
+  const buildModules = path.join(buildPath, 'node_modules');
+  copyRuntimePackagesIntoNodeModules(buildModules);
 
   // Keep raw main-process crypto helpers available at runtime.
   // Vite leaves the require() in main.js, so packaged builds need these files copied in.
@@ -139,37 +162,85 @@ function copyRuntimeFilesIntoBuild(buildPath) {
   }
 }
 
-function getPackagedResourcesDir(outputPath, platform) {
-  if (platform === 'darwin') {
-    const appBundlePath = outputPath.endsWith('.app') ? outputPath : path.join(outputPath, `${APP_PACKAGE_NAME}.app`);
-    return path.join(appBundlePath, 'Contents', 'Resources');
-  }
-
-  return path.join(outputPath, 'resources');
+function getRuntimeTarget(platform = process.platform, arch = process.arch) {
+  return {
+    platform,
+    arch,
+    libsignalPrebuildDir: `${platform}-${arch}`,
+  };
 }
 
-function copyRuntimeFilesIntoPackagedApp(outputPath, platform) {
-  const resourcesDir = getPackagedResourcesDir(outputPath, platform);
-  const vendorModulesDir = path.join(resourcesDir, 'vendor', 'node_modules');
-  fs.mkdirSync(vendorModulesDir, { recursive: true });
-
-  const rootModules = path.resolve(__dirname, 'node_modules');
-  const packages = [
-    ...NATIVE_DEPS,
-    'node-gyp-build',
-    'uuid',
-    'type-fest',
-    'bindings',
-    'file-uri-to-path',
-  ];
-
-  for (const dep of packages) {
-    const src = path.join(rootModules, dep);
-    const dest = path.join(vendorModulesDir, dep);
-    if (fs.existsSync(src)) {
-      copyDirSync(src, dest);
+function inferArchFromOutputPath(outputPath) {
+  for (const candidate of ['arm64', 'x64', 'ia32', 'armv7l']) {
+    if (outputPath.includes(candidate)) {
+      return candidate;
     }
   }
+
+  return process.arch;
+}
+
+function pruneLibsignalClientPackage(packageRoot, target) {
+  if (!fs.existsSync(packageRoot)) return;
+
+  const prebuildsDir = path.join(packageRoot, 'prebuilds');
+  if (fs.existsSync(prebuildsDir)) {
+    for (const entry of fs.readdirSync(prebuildsDir, { withFileTypes: true })) {
+      if (entry.name === target.libsignalPrebuildDir) continue;
+      removePathSync(path.join(prebuildsDir, entry.name));
+    }
+  }
+
+  for (const filePath of walkFiles(packageRoot, (fullPath) => (
+    fullPath.endsWith('.d.ts') || fullPath.endsWith('.md')
+  ))) {
+    removePathSync(filePath);
+  }
+}
+
+function pruneBetterSqlite3Package(packageRoot) {
+  if (!fs.existsSync(packageRoot)) return;
+
+  const buildReleaseDir = path.join(packageRoot, 'build', 'Release');
+  const preferredBinaryPath = path.join(buildReleaseDir, 'better_sqlite3.node');
+  const fallbackBinaryPath = walkFiles(
+    path.join(packageRoot, 'bin'),
+    (fullPath) => path.basename(fullPath) === 'better-sqlite3.node'
+  )[0] || null;
+  const nativeBinaryPath = fs.existsSync(preferredBinaryPath) ? preferredBinaryPath : fallbackBinaryPath;
+  const nativeBinaryContents = nativeBinaryPath ? fs.readFileSync(nativeBinaryPath) : null;
+
+  for (const relativePath of ['bin', 'build', 'deps', 'src', 'binding.gyp', 'README.md']) {
+    removePathSync(path.join(packageRoot, relativePath));
+  }
+
+  if (nativeBinaryContents) {
+    fs.mkdirSync(buildReleaseDir, { recursive: true });
+    fs.writeFileSync(path.join(buildReleaseDir, 'better_sqlite3.node'), nativeBinaryContents);
+  }
+}
+
+function pruneRuntimeFilesInBuild(buildPath, target = getRuntimeTarget()) {
+  const buildModules = path.join(buildPath, 'node_modules');
+  pruneLibsignalClientPackage(path.join(buildModules, '@signalapp', 'libsignal-client'), target);
+  pruneBetterSqlite3Package(path.join(buildModules, 'better-sqlite3'));
+}
+
+function copyRuntimeVendorIntoPackagedApp(outputPath, platform) {
+  if (!outputPath) return;
+
+  const appBundlePath = outputPath.endsWith('.app') ? outputPath : path.join(outputPath, `${APP_PACKAGE_NAME}.app`);
+  const resourcesDir = platform === 'darwin'
+    ? path.join(appBundlePath, 'Contents', 'Resources')
+    : path.join(outputPath, 'resources');
+
+  if (!fs.existsSync(resourcesDir)) return;
+
+  const vendorNodeModules = path.join(resourcesDir, 'vendor', 'node_modules');
+  const target = getRuntimeTarget(platform || process.platform, inferArchFromOutputPath(outputPath));
+
+  copySelectedPackagesIntoNodeModules(vendorNodeModules, PACKAGED_VENDOR_DEPS);
+  pruneLibsignalClientPackage(path.join(vendorNodeModules, '@signalapp', 'libsignal-client'), target);
 }
 
 function walkFiles(rootDir, predicate, results = []) {
@@ -196,11 +267,10 @@ function signPackagedDarwinApp(outputPath, platform) {
   const identity = process.env.GUILD_MAC_SIGN_IDENTITY || 'Developer ID Application';
   const appBundlePath = outputPath.endsWith('.app') ? outputPath : path.join(outputPath, `${APP_PACKAGE_NAME}.app`);
   const resourcesDir = path.join(appBundlePath, 'Contents', 'Resources');
-  const vendorModulesDir = path.join(resourcesDir, 'vendor', 'node_modules');
   const appleVoiceHelperDir = path.join(resourcesDir, APPLE_VOICE_HELPER_RELATIVE_DIR, 'bin');
 
   const nestedCodePaths = [
-    ...walkFiles(vendorModulesDir, (fullPath) => fullPath.endsWith('.node')),
+    ...walkFiles(resourcesDir, (fullPath) => fullPath.endsWith('.node')),
     ...walkFiles(appleVoiceHelperDir, (fullPath) => {
       try {
         return (fs.statSync(fullPath).mode & 0o111) !== 0;
@@ -263,7 +333,7 @@ module.exports = {
     packageAfterCopy: async (_config, buildPath) => {
       copyRuntimeFilesIntoBuild(buildPath);
     },
-    packageAfterPrune: async (_config, buildPath) => {
+    packageAfterPrune: async (_config, buildPath, _electronVersion, platform, arch) => {
       copyRuntimeFilesIntoBuild(buildPath);
 
       // Rebuild native addons for the target Electron version
@@ -273,10 +343,12 @@ module.exports = {
         electronVersion: require('./package.json').devDependencies.electron.replace('^', ''),
         force: true,
       });
+
+      pruneRuntimeFilesInBuild(buildPath, getRuntimeTarget(platform || process.platform, arch || process.arch));
     },
     postPackage: async (_config, packageResult) => {
       for (const outputPath of packageResult.outputPaths) {
-        copyRuntimeFilesIntoPackagedApp(outputPath, packageResult.platform);
+        copyRuntimeVendorIntoPackagedApp(outputPath, packageResult.platform);
         signPackagedDarwinApp(outputPath, packageResult.platform);
       }
     },
@@ -290,8 +362,8 @@ module.exports = {
         icon: path.join(__dirname, 'assets', 'icon.png'),
         format: 'ULFO',
         contents: (opts) => ([
-          { x: 214, y: 256, type: 'file', path: opts.appPath },
-          { x: 486, y: 256, type: 'link', path: '/Applications' },
+          { x: 188, y: 248, type: 'file', path: opts.appPath },
+          { x: 512, y: 248, type: 'link', path: '/Applications' },
         ]),
       },
     },

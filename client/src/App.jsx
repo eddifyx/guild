@@ -10,6 +10,7 @@ import MainLayout from './components/Layout/MainLayout';
 import HashLock from './components/Auth/HashLock';
 import SecureBlockedView from './components/Common/SecureBlockedView';
 import GuildOnboardingScreen from './components/Guild/GuildOnboardingScreen';
+import { confirmLogout } from './utils/confirmLogout';
 
 class ErrorBoundary extends Component {
   constructor(props) {
@@ -71,6 +72,10 @@ function AppContent() {
     setShowRain(false);
   }, []);
 
+  const handleConfirmedLogout = useCallback(() => {
+    void confirmLogout(logout);
+  }, [logout]);
+
   // No user yet - show login
   if (!user) return <LoginScreen onLoginSuccess={handleLoginSuccess} />;
 
@@ -78,7 +83,7 @@ function AppContent() {
   if (showRain) return <HashLock onComplete={handleRainComplete} />;
 
   if (securityState === 'booting') {
-    return <SecureBlockedView mode="booting" onLogout={logout} />;
+    return <SecureBlockedView mode="booting" onLogout={handleConfirmedLogout} />;
   }
 
   if (securityState === 'blocked') {
@@ -87,7 +92,7 @@ function AppContent() {
         mode="blocked"
         error={cryptoError}
         onRetry={retryCryptoInitialization}
-        onLogout={logout}
+        onLogout={handleConfirmedLogout}
       />
     );
   }

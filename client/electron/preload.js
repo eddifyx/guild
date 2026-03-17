@@ -49,15 +49,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getPerfSamples: () => ipcRenderer.invoke('perf:get-samples'),
 });
 
-// Expose Electron safeStorage API for encrypted key persistence.
-// Used by the E2E encryption key store to protect the master key
-// via the operating system's keychain (macOS Keychain, Windows DPAPI, etc.).
-contextBridge.exposeInMainWorld('electronCrypto', {
-  encryptString: (plaintext) => ipcRenderer.invoke('safe-storage-encrypt', plaintext),
-  decryptString: (encrypted) => ipcRenderer.invoke('safe-storage-decrypt', encrypted),
-  isEncryptionAvailable: () => ipcRenderer.invoke('safe-storage-available'),
-});
-
 // Expose libsignal crypto operations (all key material stays in main process).
 contextBridge.exposeInMainWorld('signalCrypto', {
   initialize: (userId) => ipcRenderer.invoke('signal:initialize', userId),

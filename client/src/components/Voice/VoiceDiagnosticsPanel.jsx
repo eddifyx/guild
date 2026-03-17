@@ -54,6 +54,7 @@ export default function VoiceDiagnosticsPanel({ liveDiagnostics, testDiagnostics
 
   const liveCapture = liveDiagnostics?.liveCapture;
   const liveSender = liveDiagnostics?.senderStats;
+  const screenShare = liveDiagnostics?.screenShare;
   const liveConsumers = Object.entries(liveDiagnostics?.consumers || {});
   const testCapture = testDiagnostics;
 
@@ -153,6 +154,23 @@ export default function VoiceDiagnosticsPanel({ liveDiagnostics, testDiagnostics
           <MetricRow label="Remote Jitter (ms)" value={liveSender?.remoteInboundAudio?.jitterMs} />
           <MetricRow label="Candidate RTT (ms)" value={liveSender?.candidatePair?.currentRoundTripTimeMs} />
           <MetricRow label="Outgoing Bitrate" value={liveSender?.candidatePair?.availableOutgoingBitrate} />
+        </DiagnosticsCard>
+
+        <DiagnosticsCard title="Screen Share">
+          <MetricRow label="Active" value={screenShare?.active} />
+          <MetricRow label="Sampled" value={screenShare?.sampledAt} />
+          <MetricRow label="Target Resolution" value={screenShare?.requestedCapture?.minimumResolution} />
+          <MetricRow label="Target FPS" value={screenShare?.requestedCapture?.targetFps} />
+          <MetricRow label="Captured Width" value={screenShare?.captureTrack?.settings?.width} />
+          <MetricRow label="Captured Height" value={screenShare?.captureTrack?.settings?.height} />
+          <MetricRow label="Captured FPS" value={screenShare?.captureTrack?.settings?.frameRate} />
+          <MetricRow label="Sent Width" value={screenShare?.sender?.outboundVideo?.frameWidth} />
+          <MetricRow label="Sent Height" value={screenShare?.sender?.outboundVideo?.frameHeight} />
+          <MetricRow label="Sent FPS" value={screenShare?.sender?.outboundVideo?.framesPerSecond} />
+          <MetricRow label="Sent Bitrate (kbps)" value={screenShare?.sender?.outgoingBitrateKbps} />
+          <MetricRow label="Quality Limitation" value={screenShare?.sender?.outboundVideo?.qualityLimitationReason} />
+          <MetricRow label="Remote RTT (ms)" value={screenShare?.sender?.remoteInboundVideo?.roundTripTimeMs} />
+          <MetricRow label="Candidate RTT (ms)" value={screenShare?.sender?.candidatePair?.currentRoundTripTimeMs} />
         </DiagnosticsCard>
 
         <DiagnosticsCard title="Mic Test">

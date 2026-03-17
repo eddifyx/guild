@@ -276,6 +276,10 @@ function preserveReadableMessage(existing, incoming) {
   };
 }
 
+function createConversationTimestamp() {
+  return new Date().toISOString().replace('T', ' ').slice(0, 19);
+}
+
 function getMessageTimestampValue(message) {
   const raw = message?.created_at ?? message?.createdAt ?? message?.timestamp ?? null;
   if (typeof raw === 'number' && Number.isFinite(raw)) {
@@ -348,9 +352,13 @@ function appendOrReplaceMessage(existingMessages, incomingMessage) {
     return sortMessagesChronologically([...(existingMessages || []), incomingMessage]);
   }
 
+  const incomingClientNonce = incomingMessage.client_nonce || incomingMessage._clientNonce || null;
   let replaced = false;
   const next = (existingMessages || []).map(message => {
-    if (message?.id !== incomingMessage.id) return message;
+    const messageClientNonce = message?.client_nonce || message?._clientNonce || null;
+    const matchesById = message?.id === incomingMessage.id;
+    const matchesByClientNonce = Boolean(incomingClientNonce) && incomingClientNonce === messageClientNonce;
+    if (!matchesById && !matchesByClientNonce) return message;
     replaced = true;
     return preserveReadableMessage(message, incomingMessage);
   });
@@ -492,7 +500,11 @@ async function tryDecryptMessage(msg, userId, retryState = null, options = {}) {
       } catch (retryErr) {
         const senderKeyArrived = await waitForSenderKeyUpdate(msg.room_id);
         const recoveredFromStorage = senderKeyArrived ? false : (await syncRoomSenderKeys(msg.room_id)) > 0;
-        if (senderKeyArrived || recoveredFromStorage) {
+        const recoveredFromDeliveredHistory = (senderKeyArrived || recoveredFromStorage)
+          ? false
+          : (await syncRoomSenderKeys(msg.room_id, { includeDelivered: true, limit: 64 })) > 0;
+
+        if (senderKeyArrived || recoveredFromStorage || recoveredFromDeliveredHistory) {
           try {
             await flushPendingControlMessagesNow();
             return await decryptRoomMessage(msg, userId);
@@ -637,7 +649,7 @@ export function useMessages(conversation, perfTraceId = null) {
   const [hasMore, setHasMore] = useState(true);
   const [error, setError] = useState('');
   const prevConvRef = useRef(null);
-  const pendingSentPlaintextsRef = useRef([]);
+  const pendingSentMessagesRef = useRef(new Map());
   const messagesRef = useRef([]);
   const retryFailedVisibleRoomMessagesRef = useRef(async () => {});
 
@@ -654,7 +666,6 @@ export function useMessages(conversation, perfTraceId = null) {
       setHasMore(cached?.hasMore ?? true);
       setError('');
       setLoading(false);
-      pendingSentPlaintextsRef.current = [];
       prevConvRef.current = key;
     }
   }, [conversation]);
@@ -906,8 +917,9 @@ export function useMessages(conversation, perfTraceId = null) {
         if (msg.room_id !== conversation.id) return;
 
         if (msg.encrypted && msg.sender_id === user?.userId) {
-          const pending = pendingSentPlaintextsRef.current.shift();
+          const pending = msg.client_nonce ? pendingSentMessagesRef.current.get(msg.client_nonce) : null;
           if (pending) {
+            pendingSentMessagesRef.current.delete(msg.client_nonce);
             persistDecryptedMessage(msg, pending.content, pending.attachments, user?.userId);
             setMessages(prev => {
               const next = appendOrReplaceMessage(prev, {
@@ -916,6 +928,7 @@ export function useMessages(conversation, perfTraceId = null) {
                 _decrypted: true,
                 _decryptedAttachments: pending.attachments,
                 _ciphertextContent: msg.content,
+                _clientNonce: msg.client_nonce || pending.clientNonce || null,
               });
               updateCachedConversationState(getConversationCacheKey(conversation), cached => ({
                 messages: next,
@@ -949,10 +962,10 @@ export function useMessages(conversation, perfTraceId = null) {
       if (!isThisDM) return;
 
       if (msg.encrypted && msg.sender_id === user?.userId) {
-        const pending = pendingSentPlaintextsRef.current.shift();
+        const pending = msg.client_nonce ? pendingSentMessagesRef.current.get(msg.client_nonce) : null;
         if (pending) {
+          pendingSentMessagesRef.current.delete(msg.client_nonce);
           setMessages(prev => {
-            if (prev.some(m => m.id === msg.id)) return prev;
             persistDecryptedMessage(msg, pending.content, pending.attachments, user?.userId);
             const next = appendOrReplaceMessage(prev, {
               ...msg,
@@ -960,6 +973,7 @@ export function useMessages(conversation, perfTraceId = null) {
               _decrypted: true,
               _decryptedAttachments: pending.attachments,
               _ciphertextContent: msg.content,
+              _clientNonce: msg.client_nonce || pending.clientNonce || null,
             });
             updateCachedConversationState(getConversationCacheKey(conversation), cached => ({
               messages: next,
@@ -984,7 +998,7 @@ export function useMessages(conversation, perfTraceId = null) {
 
     socket.on('dm:message', handler);
     return () => socket.off('dm:message', handler);
-  }, [socket, conversation, user?.userId]);
+  }, [socket, conversation, hasMore, user?.userId, user?.username, user?.avatarColor, user?.profilePicture, user?.npub]);
 
   useEffect(() => {
     if (!conversation || !user?.userId || messages.length === 0) return;
@@ -1084,7 +1098,11 @@ export function useMessages(conversation, perfTraceId = null) {
       });
     });
 
+    const clientNonce = window.crypto?.randomUUID?.()
+      || `local-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+    const conversationKey = getConversationCacheKey(conversation);
     const pendingEntry = {
+      clientNonce,
       content,
       attachments: attachments && attachments.length > 0
         ? attachments.map(a => ({
@@ -1098,39 +1116,107 @@ export function useMessages(conversation, perfTraceId = null) {
           }))
         : encryptedAttachmentMeta,
     };
+    const optimisticMessage = {
+      id: `optimistic:${clientNonce}`,
+      client_nonce: clientNonce,
+      _clientNonce: clientNonce,
+      content,
+      sender_id: user?.userId,
+      sender_name: user?.username || 'You',
+      sender_color: user?.avatarColor || '#40FF40',
+      sender_picture: user?.profilePicture || null,
+      sender_npub: user?.npub || null,
+      room_id: conversation.type === 'room' ? conversation.id : null,
+      dm_partner_id: conversation.type === 'dm' ? conversation.id : null,
+      attachments: [],
+      created_at: createConversationTimestamp(),
+      encrypted: 1,
+      _decrypted: true,
+      _decryptedAttachments: pendingEntry.attachments,
+      _optimistic: true,
+    };
+
+    pendingSentMessagesRef.current.set(clientNonce, pendingEntry);
+    setMessages(prev => {
+      const next = appendOrReplaceMessage(prev, optimisticMessage);
+      updateCachedConversationState(conversationKey, cached => ({
+        messages: next,
+        hasMore: cached?.hasMore ?? hasMore,
+      }));
+      return next;
+    });
 
     try {
       if (conversation.type === 'room') {
         const encrypted = await encryptGroupMessage(conversation.id, content, encryptedAttachmentMeta);
-        pendingSentPlaintextsRef.current.push(pendingEntry);
         const response = await emitWithAck('room:message', {
           roomId: conversation.id,
           content: encrypted,
           attachments: attachmentRefs,
           encrypted: true,
+          clientNonce,
         });
         if (response?.messageId) {
+          pendingSentMessagesRef.current.delete(clientNonce);
           persistDecryptedMessage({ id: response.messageId, encrypted: true, content: encrypted }, content, pendingEntry.attachments, user?.userId);
+          const finalizedMessage = {
+            ...optimisticMessage,
+            id: response.messageId,
+            _optimistic: false,
+            _ciphertextContent: encrypted,
+          };
+          updateCachedConversationState(conversationKey, cached => ({
+            messages: appendOrReplaceMessage(cached?.messages || [], finalizedMessage),
+            hasMore: cached?.hasMore ?? hasMore,
+          }));
+          if (prevConvRef.current === conversationKey) {
+            setMessages(prev => appendOrReplaceMessage(prev, finalizedMessage));
+          }
         }
         return;
       }
 
       const encrypted = await encryptDirectMessage(conversation.id, content, encryptedAttachmentMeta);
-      pendingSentPlaintextsRef.current.push(pendingEntry);
       const response = await emitWithAck('dm:message', {
         toUserId: conversation.id,
         content: encrypted,
         attachments: attachmentRefs,
         encrypted: true,
+        clientNonce,
       });
       if (response?.messageId) {
+        pendingSentMessagesRef.current.delete(clientNonce);
         persistDecryptedMessage({ id: response.messageId, encrypted: true, content: encrypted }, content, pendingEntry.attachments, user?.userId);
+        const finalizedMessage = {
+          ...optimisticMessage,
+          id: response.messageId,
+          _optimistic: false,
+          _ciphertextContent: encrypted,
+        };
+        updateCachedConversationState(conversationKey, cached => ({
+          messages: appendOrReplaceMessage(cached?.messages || [], finalizedMessage),
+          hasMore: cached?.hasMore ?? hasMore,
+        }));
+        if (prevConvRef.current === conversationKey) {
+          setMessages(prev => appendOrReplaceMessage(prev, finalizedMessage));
+        }
       }
     } catch (err) {
-      pendingSentPlaintextsRef.current = pendingSentPlaintextsRef.current.filter(entry => entry !== pendingEntry);
+      pendingSentMessagesRef.current.delete(clientNonce);
+      updateCachedConversationState(conversationKey, cached => cached ? {
+        messages: cached.messages.filter((message) => (
+          (message?.client_nonce || message?._clientNonce || null) !== clientNonce
+        )),
+        hasMore: cached.hasMore,
+      } : null);
+      if (prevConvRef.current === conversationKey) {
+        setMessages(prev => prev.filter((message) => (
+          (message?.client_nonce || message?._clientNonce || null) !== clientNonce
+        )));
+      }
       throw err;
     }
-  }, [socket, conversation, user?.userId]);
+  }, [socket, conversation, hasMore, user?.userId, user?.username, user?.avatarColor, user?.profilePicture, user?.npub]);
 
   const loadMore = useCallback(async () => {
     if (!conversation || !messages.length || loading || !hasMore) return;

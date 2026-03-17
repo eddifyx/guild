@@ -1,1 +1,45 @@
-{ "version": "1.0.40" }
+{
+  "version": "1.0.42",
+  "releasedAt": "2026-03-16",
+  "patchNotes": {
+    "headline": "Faster chat, cleaner rooms, and better screen sharing",
+    "summary": "v1.0.42 makes DMs and room chat feel more immediate, cleans up historical room decryption UX, shows real profile pictures in the Messages list, adds logout confirmation, and pushes screen sharing harder on resolution and frame pacing.",
+    "sections": [
+      {
+        "title": "Messaging polish",
+        "items": [
+          "Messages now appear locally right away when you send them in secure DMs and rooms, instead of waiting for the round trip.",
+          "Historical room messages that cannot be decrypted are now hidden from the timeline instead of showing scary failure rows.",
+          "Opening General or other room history now feels cleaner when older encrypted messages are present."
+        ]
+      },
+      {
+        "title": "Interface",
+        "items": [
+          "The Messages list in the left sidebar now shows profile pictures when they exist instead of falling back to initials.",
+          "Logout now asks for confirmation before ending your session."
+        ]
+      },
+      {
+        "title": "Streaming",
+        "items": [
+          "Screen sharing now requests a more aggressive high-resolution capture profile before encoding, with stronger bitrate and frame pacing targets.",
+          "Streaming is tuned to hold sharper detail and smoother motion more consistently on supported displays.",
+          "Windows stays pinned to v1.0.40 until a real Windows-native build is published."
+        ]
+      }
+    ]
+  },
+  "platformOverrides": {
+    "win32": {
+      "version": "1.0.40",
+      "releasedAt": null,
+      "patchNotes": null
+    },
+    "win32-x64": {
+      "version": "1.0.40",
+      "releasedAt": null,
+      "patchNotes": null
+    }
+  }
+}

@@ -27,6 +27,12 @@ function ChatView({ conversation, openTraceId = null }) {
   ), [conversation, dmSupported]);
   const dmUnavailable = effectiveConversation?.type === 'dm' && effectiveConversation?.dmUnsupported;
   const { messages, loading, hasMore, error: conversationError, sendMessage, loadMore, editMessage, deleteMessage } = useMessages(effectiveConversation, openTraceId);
+  const visibleMessages = useMemo(() => messages.filter((message) => !(
+    message?.room_id
+    && message?.encrypted
+    && !message?._decrypted
+    && (message?._decryptionPending || message?._decryptionFailed)
+  )), [messages]);
   const bottomRef = useRef(null);
   const scrollRef = useRef(null);
   const wasAtBottomRef = useRef(true);
@@ -118,7 +124,7 @@ function ChatView({ conversation, openTraceId = null }) {
       }
     });
     return () => cancelAnimationFrame(frameId);
-  }, [messages.length, scrollToBottom]);
+  }, [visibleMessages.length, scrollToBottom]);
 
   useEffect(() => {
     if (!conversation || !pendingInitialScrollRef.current) return;
@@ -127,7 +133,7 @@ function ChatView({ conversation, openTraceId = null }) {
       pendingInitialScrollRef.current = false;
     });
     return () => cancelAnimationFrame(frameId);
-  }, [conversation, messages, scrollToBottom]);
+  }, [conversation, visibleMessages, scrollToBottom]);
 
   useEffect(() => {
     if (!openTraceId || loading) return;
@@ -138,10 +144,10 @@ function ChatView({ conversation, openTraceId = null }) {
       status: 'ready',
       surface: 'chat-view',
       conversationType: effectiveConversation?.type || null,
-      messageCount: messages.length,
+      messageCount: visibleMessages.length,
       hasError: Boolean(conversationError || dmUnavailable),
     });
-  }, [openTraceId, loading, effectiveConversation?.type, messages.length, conversationError, dmUnavailable]);
+  }, [openTraceId, loading, effectiveConversation?.type, visibleMessages.length, conversationError, dmUnavailable]);
 
   const handleScroll = useCallback(() => {
     const el = scrollRef.current;
@@ -319,13 +325,13 @@ function ChatView({ conversation, openTraceId = null }) {
         }}
       >
         <div style={{ overflowAnchor: 'none' }}>
-          {loading && messages.length === 0 && (
+          {loading && visibleMessages.length === 0 && (
             <div style={{ textAlign: 'center', padding: 20, color: 'var(--text-muted)', fontSize: 13 }}>
               Loading messages...
             </div>
           )}
 
-          {loading && messages.length > 0 && hasMore && (
+          {loading && visibleMessages.length > 0 && hasMore && (
             <div style={{
               textAlign: 'center',
               padding: 8,
@@ -336,8 +342,8 @@ function ChatView({ conversation, openTraceId = null }) {
             </div>
           )}
 
-          {messages.map((msg, i) => {
-            const prev = messages[i - 1];
+          {visibleMessages.map((msg, i) => {
+            const prev = visibleMessages[i - 1];
             const prevSameSender = prev && prev.sender_id === msg.sender_id;
             return (
               <MessageBubble

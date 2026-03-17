@@ -26,6 +26,12 @@ function getAudioReport(reports, type) {
   )) || null;
 }
 
+function getVideoReport(reports, type) {
+  return reports.find((report) => (
+    report.type === type && (report.kind === 'video' || report.mediaType === 'video')
+  )) || null;
+}
+
 function getSelectedCandidatePair(reports) {
   return reports.find((report) => (
     report.type === 'candidate-pair' &&
@@ -73,7 +79,9 @@ export function summarizeAudioContext(ctx) {
 export function summarizeProducerStats(statsReport) {
   const reports = getStatsReports(statsReport);
   const outbound = getAudioReport(reports, 'outbound-rtp');
+  const outboundVideo = getVideoReport(reports, 'outbound-rtp');
   const remoteInbound = getAudioReport(reports, 'remote-inbound-rtp');
+  const remoteInboundVideo = getVideoReport(reports, 'remote-inbound-rtp');
   const candidatePair = getSelectedCandidatePair(reports);
 
   return pickDefined({
@@ -84,12 +92,34 @@ export function summarizeProducerStats(statsReport) {
       totalPacketSendDelayMs: secondsToMs(outbound.totalPacketSendDelay),
       nackCount: outbound.nackCount,
     }) : null,
+    outboundVideo: outboundVideo ? pickDefined({
+      packetsSent: outboundVideo.packetsSent,
+      bytesSent: outboundVideo.bytesSent,
+      retransmittedPacketsSent: outboundVideo.retransmittedPacketsSent,
+      totalPacketSendDelayMs: secondsToMs(outboundVideo.totalPacketSendDelay),
+      nackCount: outboundVideo.nackCount,
+      firCount: outboundVideo.firCount,
+      pliCount: outboundVideo.pliCount,
+      framesSent: outboundVideo.framesSent,
+      frameWidth: outboundVideo.frameWidth,
+      frameHeight: outboundVideo.frameHeight,
+      framesPerSecond: round(outboundVideo.framesPerSecond, 1),
+      qualityLimitationReason: outboundVideo.qualityLimitationReason,
+      qualityLimitationDurations: outboundVideo.qualityLimitationDurations || null,
+    }) : null,
     remoteInboundAudio: remoteInbound ? pickDefined({
       packetsLost: remoteInbound.packetsLost,
       jitterMs: secondsToMs(remoteInbound.jitter),
       roundTripTimeMs: secondsToMs(remoteInbound.roundTripTime),
       totalRoundTripTimeMs: secondsToMs(remoteInbound.totalRoundTripTime),
       fractionLost: round(remoteInbound.fractionLost, 4),
+    }) : null,
+    remoteInboundVideo: remoteInboundVideo ? pickDefined({
+      packetsLost: remoteInboundVideo.packetsLost,
+      jitterMs: secondsToMs(remoteInboundVideo.jitter),
+      roundTripTimeMs: secondsToMs(remoteInboundVideo.roundTripTime),
+      totalRoundTripTimeMs: secondsToMs(remoteInboundVideo.totalRoundTripTime),
+      fractionLost: round(remoteInboundVideo.fractionLost, 4),
     }) : null,
     candidatePair: candidatePair ? pickDefined({
       currentRoundTripTimeMs: secondsToMs(candidatePair.currentRoundTripTime),

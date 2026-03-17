@@ -8,6 +8,7 @@ import JoinGuildModal from './JoinGuildModal';
 import ProfileSettingsModal from '../Profile/ProfileSettingsModal';
 import UpdateOverlay from '../Common/UpdateOverlay';
 import Avatar from '../Common/Avatar';
+import { confirmLogout } from '../../utils/confirmLogout';
 
 export default function GuildOnboardingScreen() {
   const { user, logout } = useAuth();
@@ -219,7 +220,7 @@ export default function GuildOnboardingScreen() {
               <Avatar username={user?.username || '?'} color={user?.avatarColor || '#40FF40'} size={28} profilePicture={user?.profilePicture} />
               <span style={styles.username}>{user?.username}</span>
             </div>
-            <button onClick={logout} style={styles.logoutBtn}>Logout</button>
+            <button onClick={() => { void confirmLogout(logout); }} style={styles.logoutBtn}>Logout</button>
           </div>
         </div>
 

@@ -6,6 +6,7 @@ HOST="${GUILD_FLOKINET_HOST:-}"
 SSH_USER="${GUILD_FLOKINET_USER:-$USER}"
 SSH_KEY="${GUILD_FLOKINET_SSH_KEY:-}"
 REMOTE_STAGE_DIR="${GUILD_FLOKINET_STAGE_DIR:-}"
+TARGET="${GUILD_FLOKINET_TARGET:-staging}"
 APPLY=0
 START_SERVICE=0
 
@@ -15,18 +16,20 @@ Usage: ops/flokinet/deploy-box.sh --host HOST [options]
 
 Dry-run by default. This prepares a FlokiNET box for `/guild` by:
 - rsyncing the repo to a per-user staging directory
-- syncing the staged repo into /opt/guild on the server
+- syncing the staged repo into the selected app root on the server
 - installing server dependencies as the `guild` user
-- installing the systemd unit and env template
+- installing the target-specific systemd unit and env template
 
 It does not start the service unless you pass --start-service.
+Defaults to the safer `staging` target.
 
 Options:
   --host HOST         Remote server IP or hostname
   --user USER         SSH user (default: current local username)
   --ssh-key PATH      SSH identity file
-  --stage-dir PATH    Remote staging directory (default: /home/USER/guild-deploy)
-  --start-service     Enable and start guild-server after sync/install
+  --stage-dir PATH    Remote sync directory (default: /home/USER/guild-deploy-TARGET)
+  --target NAME       staging or production (default: staging)
+  --start-service     Enable and start the target service after sync/install
   --apply             Execute the deploy
   -h, --help          Show this help
 
@@ -35,6 +38,7 @@ Environment:
   GUILD_FLOKINET_USER
   GUILD_FLOKINET_SSH_KEY
   GUILD_FLOKINET_STAGE_DIR
+  GUILD_FLOKINET_TARGET
 EOF
 }
 
@@ -54,6 +58,10 @@ while (($#)); do
       ;;
     --stage-dir)
       REMOTE_STAGE_DIR="${2:-}"
+      shift
+      ;;
+    --target)
+      TARGET="${2:-}"
       shift
       ;;
     --start-service)
@@ -81,8 +89,32 @@ if [[ -z "$HOST" ]]; then
   exit 1
 fi
 
+case "$TARGET" in
+  production)
+    REMOTE_APP_DIR="/opt/guild"
+    SERVICE_NAME="guild-server"
+    REMOTE_ENV_FILE="/etc/guild/guild-server.env"
+    REMOTE_ENV_TEMPLATE="/opt/guild/ops/flokinet/guild-server.env.example"
+    REMOTE_SERVICE_FILE="/etc/systemd/system/guild-server.service"
+    REMOTE_SERVICE_TEMPLATE="/opt/guild/ops/flokinet/guild-server.service"
+    ;;
+  staging)
+    REMOTE_APP_DIR="/opt/guild-staging"
+    SERVICE_NAME="guild-staging"
+    REMOTE_ENV_FILE="/etc/guild/guild-staging.env"
+    REMOTE_ENV_TEMPLATE="/opt/guild-staging/ops/flokinet/guild-staging.env.example"
+    REMOTE_SERVICE_FILE="/etc/systemd/system/guild-staging.service"
+    REMOTE_SERVICE_TEMPLATE="/opt/guild-staging/ops/flokinet/guild-staging.service"
+    ;;
+  *)
+    echo "Invalid target: $TARGET" >&2
+    usage >&2
+    exit 1
+    ;;
+esac
+
 if [[ -z "$REMOTE_STAGE_DIR" ]]; then
-  REMOTE_STAGE_DIR="/home/$SSH_USER/guild-deploy"
+  REMOTE_STAGE_DIR="/home/$SSH_USER/guild-deploy-$TARGET"
 fi
 
 SSH_OPTS=(-o StrictHostKeyChecking=no)
@@ -111,11 +143,12 @@ if [[ "$APPLY" -eq 0 ]]; then
   $ROOT_DIR/ -> $SSH_USER@$HOST:$REMOTE_STAGE_DIR/
 
 Remote install step would:
-- sync $REMOTE_STAGE_DIR/ into /opt/guild/
+- sync $REMOTE_STAGE_DIR/ into $REMOTE_APP_DIR/
 - preserve runtime data directories
 - install server dependencies
-- copy the env template if /etc/guild/guild-server.env does not exist
-- install guild-server.service
+- copy the env template if $REMOTE_ENV_FILE does not exist
+- install $SERVICE_NAME.service
+- reassert mediasoup firewall ports if ufw is active
 EOF
   exit 0
 fi
@@ -127,35 +160,47 @@ rsync "${RSYNC_ARGS[@]}" -e "ssh ${SSH_OPTS[*]}" "$ROOT_DIR/" "$SSH_USER@$HOST:$
 REMOTE_SCRIPT=$(cat <<EOF
 set -euo pipefail
 
-sudo mkdir -p /opt/guild /opt/guild/server/data /opt/guild/uploads /opt/guild/updates /etc/guild
+sudo mkdir -p '$REMOTE_APP_DIR' '$REMOTE_APP_DIR/server/data' '$REMOTE_APP_DIR/uploads' '$REMOTE_APP_DIR/updates' /etc/guild
 
 sudo rsync -a --delete \\
   --exclude server/data/ \\
   --exclude uploads/ \\
   --exclude updates/ \\
-  '$REMOTE_STAGE_DIR/' /opt/guild/
+  '$REMOTE_STAGE_DIR/' '$REMOTE_APP_DIR/'
 
-sudo chown -R guild:guild /opt/guild /etc/guild
+sudo chown -R guild:guild '$REMOTE_APP_DIR' /etc/guild
 
-if [[ ! -f /etc/guild/guild-server.env ]]; then
-  sudo cp /opt/guild/ops/flokinet/guild-server.env.example /etc/guild/guild-server.env
+if [[ ! -f '$REMOTE_ENV_FILE' ]]; then
+  sudo cp '$REMOTE_ENV_TEMPLATE' '$REMOTE_ENV_FILE'
 fi
 
-sudo cp /opt/guild/ops/flokinet/guild-server.service /etc/systemd/system/guild-server.service
+sudo cp '$REMOTE_SERVICE_TEMPLATE' '$REMOTE_SERVICE_FILE'
 sudo systemctl daemon-reload
-sudo -u guild npm --prefix /opt/guild/server install --omit=dev
-sudo -u guild node /opt/guild/server/scripts/ensureBetterSqlite3.js
+sudo -u guild npm --prefix '$REMOTE_APP_DIR/server' install --omit=dev
+sudo -u guild node '$REMOTE_APP_DIR/server/scripts/ensureBetterSqlite3.js'
+
+if command -v ufw >/dev/null 2>&1; then
+  UFW_STATUS=\$(sudo ufw status || true)
+  if grep -q "Status: active" <<<"\$UFW_STATUS"; then
+    if ! grep -q "10000:10200/udp" <<<"\$UFW_STATUS"; then
+      sudo ufw allow 10000:10200/udp
+    fi
+    if ! grep -q "10000:10200/tcp" <<<"\$UFW_STATUS"; then
+      sudo ufw allow 10000:10200/tcp
+    fi
+  fi
+fi
 
 if [[ "$START_SERVICE" -eq 1 ]]; then
-  sudo systemctl enable guild-server
-  sudo systemctl restart guild-server
-  sudo systemctl status guild-server --no-pager
+  sudo systemctl enable '$SERVICE_NAME'
+  sudo systemctl restart '$SERVICE_NAME'
+  sudo systemctl status '$SERVICE_NAME' --no-pager
 else
-  sudo systemctl status guild-server --no-pager || true
+  sudo systemctl status '$SERVICE_NAME' --no-pager || true
 fi
 EOF
 )
 
 ssh -tt "${SSH_OPTS[@]}" "$SSH_USER@$HOST" "$REMOTE_SCRIPT"
 
-echo "[apply] Box staged on $HOST"
+echo "[apply] $TARGET deployed on $HOST"

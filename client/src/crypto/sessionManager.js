@@ -15,7 +15,6 @@ import {
 import { getKeyStore, resetKeyStore } from './keyStore.js';
 import { processX3DHInitMessage } from './x3dh.js';
 import { initializeSessionAsBob, ratchetDecrypt } from './doubleRatchet.js';
-import { fromBase64 } from './primitives.js';
 
 let _initialized = false;
 let _e2eExpected = false;
@@ -76,19 +75,11 @@ async function _doInit(authData, lifecycleVersion) {
 
 /**
  * Load existing v1 master key (does NOT create a new one).
- * Returns null if no v1 key exists or safeStorage is unavailable.
+ * Legacy keychain-backed v1 master keys are intentionally no longer loaded.
  */
 async function _loadExistingV1MasterKey(userId) {
   const storageKey = `byzantine-mk-${userId}`;
-  if (window.electronCrypto && await window.electronCrypto.isEncryptionAvailable()) {
-    const stored = localStorage.getItem(storageKey);
-    if (stored) {
-      try {
-        const decrypted = await window.electronCrypto.decryptString(stored);
-        return fromBase64(decrypted);
-      } catch { return null; }
-    }
-  }
+  localStorage.removeItem(storageKey);
   return null;
 }
 

@@ -16,7 +16,7 @@ function initTables() {
   db.exec(`
     CREATE TABLE IF NOT EXISTS users (
       id TEXT PRIMARY KEY,
-      username TEXT NOT NULL UNIQUE,
+      username TEXT NOT NULL,
       avatar_color TEXT NOT NULL,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       last_seen TEXT
@@ -159,6 +159,88 @@ try { db.exec('ALTER TABLE users ADD COLUMN profile_picture TEXT'); } catch (e) 
 try { db.exec('ALTER TABLE guilds ADD COLUMN theme_mode TEXT DEFAULT \'dark\''); } catch (e) {}
 try { db.exec('ALTER TABLE users ADD COLUMN custom_status TEXT DEFAULT \'\''); } catch (e) {}
 try { db.exec("ALTER TABLE guild_members ADD COLUMN permission_overrides TEXT DEFAULT ''"); } catch (e) {}
+
+function usersTableHasUniqueUsernameConstraint() {
+  const row = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'users'").get();
+  const sql = String(row?.sql || '')
+    .replace(/\s+/g, ' ')
+    .toUpperCase();
+  return sql.includes('USERNAME TEXT NOT NULL UNIQUE')
+    || sql.includes('UNIQUE(USERNAME)')
+    || sql.includes('UNIQUE (USERNAME)');
+}
+
+function migrateUsersToAllowDuplicateUsernames() {
+  if (!usersTableHasUniqueUsernameConstraint()) {
+    return;
+  }
+
+  const userColumns = new Set(
+    db.prepare('PRAGMA table_info(users)').all().map((column) => column.name)
+  );
+
+  db.pragma('foreign_keys = OFF');
+  const migrate = db.transaction(() => {
+    db.exec(`
+      CREATE TABLE users_new (
+        id TEXT PRIMARY KEY,
+        username TEXT NOT NULL,
+        avatar_color TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        last_seen TEXT,
+        npub TEXT,
+        lud16 TEXT,
+        profile_picture TEXT,
+        custom_status TEXT DEFAULT ''
+      );
+    `);
+
+    const createdAtExpr = userColumns.has('created_at') ? 'created_at' : "datetime('now')";
+    const lastSeenExpr = userColumns.has('last_seen') ? 'last_seen' : 'NULL';
+    const npubExpr = userColumns.has('npub') ? 'npub' : 'NULL';
+    const lud16Expr = userColumns.has('lud16') ? 'lud16' : 'NULL';
+    const profilePictureExpr = userColumns.has('profile_picture') ? 'profile_picture' : 'NULL';
+    const customStatusExpr = userColumns.has('custom_status') ? 'custom_status' : "''";
+
+    db.exec(`
+      INSERT INTO users_new (
+        id,
+        username,
+        avatar_color,
+        created_at,
+        last_seen,
+        npub,
+        lud16,
+        profile_picture,
+        custom_status
+      )
+      SELECT
+        id,
+        username,
+        avatar_color,
+        ${createdAtExpr},
+        ${lastSeenExpr},
+        ${npubExpr},
+        ${lud16Expr},
+        ${profilePictureExpr},
+        ${customStatusExpr}
+      FROM users
+    `);
+
+    db.exec('DROP TABLE users');
+    db.exec('ALTER TABLE users_new RENAME TO users');
+    db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_npub ON users(npub)');
+  });
+
+  try {
+    migrate();
+    console.log('[DB] Users migration complete: duplicate usernames are now allowed');
+  } finally {
+    db.pragma('foreign_keys = ON');
+  }
+}
+
+migrateUsersToAllowDuplicateUsernames();
 
 // Make Rendir the Guild Master of /guild (one-time fix for pre-rank guild)
 try {
@@ -695,7 +777,11 @@ function getDMConversations(userId) {
   return db.prepare(`
     SELECT dc.*,
       CASE WHEN dc.user_a_id = ? THEN dc.user_b_id ELSE dc.user_a_id END as other_user_id,
-      u.username as other_username, u.avatar_color as other_avatar_color, u.last_seen as other_last_seen, u.npub as other_npub
+      u.username as other_username,
+      u.avatar_color as other_avatar_color,
+      u.profile_picture as other_profile_picture,
+      u.last_seen as other_last_seen,
+      u.npub as other_npub
     FROM dm_conversations dc
     JOIN users u ON u.id = CASE WHEN dc.user_a_id = ? THEN dc.user_b_id ELSE dc.user_a_id END
     WHERE dc.user_a_id = ? OR dc.user_b_id = ?
@@ -840,6 +926,21 @@ const getPendingSenderKeyDistributionsForRecipientInRoom = db.prepare(`
     AND skd.room_id = ?
     AND skd.delivered_at IS NULL
   ORDER BY skd.created_at ASC
+`);
+const getRecentSenderKeyDistributionsForRecipientInRoom = db.prepare(`
+  SELECT skd.id,
+         skd.room_id,
+         skd.sender_user_id,
+         skd.distribution_id,
+         skd.envelope,
+         skd.created_at,
+         u.npub AS sender_npub
+  FROM sender_key_distributions skd
+  JOIN users u ON u.id = skd.sender_user_id
+  WHERE skd.recipient_user_id = ?
+    AND skd.room_id = ?
+  ORDER BY skd.created_at DESC
+  LIMIT ?
 `);
 const acknowledgeSenderKeyDistribution = db.prepare(
   `UPDATE sender_key_distributions
@@ -1253,6 +1354,7 @@ module.exports = {
   deleteGuildRow,
   getUserCreatedGuildCount,
   updateGuildInviteCode,
+  getRecentSenderKeyDistributionsForRecipientInRoom,
   createGuildRank,
   getGuildRanks,
   getGuildRankById,

@@ -88,6 +88,10 @@ export function VoiceProvider({ children }) {
     prevSharersRef.current = sharers;
   }, [voice.channelId, channels.voiceChannels, user?.userId]);
 
+  useEffect(() => {
+    voice.setOutputDevice(devices.selectedOutput);
+  }, [devices.selectedOutput, voice.setOutputDevice]);
+
   const voiceValue = useMemo(() => ({
     channelId: voice.channelId,
     muted: voice.muted,
@@ -100,6 +104,7 @@ export function VoiceProvider({ children }) {
     setUserVolume: voice.setUserVolume,
     screenSharing: voice.screenSharing,
     screenShareStream: voice.screenShareStream,
+    screenShareDiagnostics: voice.screenShareDiagnostics,
     startScreenShare: voice.startScreenShare,
     stopScreenShare: voice.stopScreenShare,
     incomingScreenShares: voice.incomingScreenShares,
@@ -125,6 +130,7 @@ export function VoiceProvider({ children }) {
     voice.setUserVolume,
     voice.screenSharing,
     voice.screenShareStream,
+    voice.screenShareDiagnostics,
     voice.startScreenShare,
     voice.stopScreenShare,
     voice.incomingScreenShares,

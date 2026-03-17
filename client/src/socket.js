@@ -164,10 +164,11 @@ export async function flushPendingControlMessagesNow() {
   await flushPendingControlMessages();
 }
 
-export async function syncRoomSenderKeys(roomId) {
+export async function syncRoomSenderKeys(roomId, { includeDelivered = false, limit = 32 } = {}) {
   if (!roomId) return 0;
-  if (pendingRoomSenderKeySyncs.has(roomId)) {
-    return pendingRoomSenderKeySyncs.get(roomId);
+  const syncKey = `${roomId}:${includeDelivered ? 'delivered' : 'pending'}`;
+  if (pendingRoomSenderKeySyncs.has(syncKey)) {
+    return pendingRoomSenderKeySyncs.get(syncKey);
   }
 
   const syncPromise = (async () => {
@@ -176,7 +177,10 @@ export async function syncRoomSenderKeys(roomId) {
 
     let pending = [];
     try {
-      pending = await api(`/api/rooms/${encodeURIComponent(roomId)}/sender-keys`);
+      const query = includeDelivered
+        ? `?includeDelivered=1&limit=${Math.min(Math.max(Number(limit) || 32, 1), 100)}`
+        : '';
+      pending = await api(`/api/rooms/${encodeURIComponent(roomId)}/sender-keys${query}`);
     } catch (err) {
       console.warn('[E2E] Failed to fetch stored sender keys:', err?.message || err);
       return 0;
@@ -217,10 +221,10 @@ export async function syncRoomSenderKeys(roomId) {
 
     return ackIds.length;
   })().finally(() => {
-    pendingRoomSenderKeySyncs.delete(roomId);
+    pendingRoomSenderKeySyncs.delete(syncKey);
   });
 
-  pendingRoomSenderKeySyncs.set(roomId, syncPromise);
+  pendingRoomSenderKeySyncs.set(syncKey, syncPromise);
   return syncPromise;
 }
 

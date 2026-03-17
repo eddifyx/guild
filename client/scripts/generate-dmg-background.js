@@ -24,10 +24,10 @@ function buildSvg(width, height) {
       </radialGradient>
     </defs>
 
-    <rect width="${width}" height="${height}" rx="18" fill="url(#bg)"/>
-    <rect width="${width}" height="${height}" rx="18" fill="url(#glowLeft)"/>
-    <rect width="${width}" height="${height}" rx="18" fill="url(#glowRight)"/>
-    <rect x="14" y="14" width="${width - 28}" height="${height - 28}" rx="14" fill="none" stroke="rgba(112,255,128,0.10)" stroke-width="1"/>
+    <rect width="${width}" height="${height}" fill="url(#bg)"/>
+    <rect width="${width}" height="${height}" fill="url(#glowLeft)"/>
+    <rect width="${width}" height="${height}" fill="url(#glowRight)"/>
+    <rect x="14" y="14" width="${width - 28}" height="${height - 28}" fill="none" stroke="rgba(112,255,128,0.10)" stroke-width="1"/>
   </svg>`;
 }
 

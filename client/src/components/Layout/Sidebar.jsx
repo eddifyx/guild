@@ -19,6 +19,7 @@ import InviteGuildModal from '../Guild/InviteGuildModal';
 import UserProfileCard from '../Common/UserProfileCard';
 import { rememberUserNpub, rememberUsers, trustUserNpub } from '../../crypto/identityDirectory.js';
 import { startPerfTrace } from '../../utils/devPerf';
+import { confirmLogout } from '../../utils/confirmLogout';
 
 
 function Sidebar({ rooms, myRooms, createRoom, joinRoom, renameRoom, deleteRoom, conversation, onSelectRoom, onSelectDM, onSelectAssetDump, onSelectAddons, onSelectStream, onSelectNostrProfile, onSelectVoiceChannel, unreadCounts, unreadRoomCounts }) {
@@ -93,6 +94,12 @@ function Sidebar({ rooms, myRooms, createRoom, joinRoom, renameRoom, deleteRoom,
         || onlineUser?.avatarColor
         || fallback.avatarColor
         || '#40FF40',
+      profilePicture:
+        guildMember?.profilePicture
+        || guildMember?.profile_picture
+        || onlineUser?.profilePicture
+        || fallback.profilePicture
+        || null,
       npub:
         guildMember?.npub
         || onlineUser?.npub
@@ -105,16 +112,19 @@ function Sidebar({ rooms, myRooms, createRoom, joinRoom, renameRoom, deleteRoom,
     const resolved = resolveDMUserMeta(conversation.other_user_id, {
       username: fallback.username || conversation.other_username,
       avatarColor: fallback.avatarColor || conversation.other_avatar_color,
+      profilePicture: fallback.profilePicture || conversation.other_profile_picture,
       npub: fallback.npub || conversation.other_npub,
     });
 
     const nextUsername = resolved.username || conversation.other_username || conversation.other_user_id;
     const nextAvatarColor = resolved.avatarColor || conversation.other_avatar_color || '#40FF40';
+    const nextProfilePicture = resolved.profilePicture || conversation.other_profile_picture || null;
     const nextNpub = resolved.npub || conversation.other_npub || null;
 
     if (
       conversation.other_username === nextUsername
       && conversation.other_avatar_color === nextAvatarColor
+      && (conversation.other_profile_picture || null) === nextProfilePicture
       && conversation.other_npub === nextNpub
     ) {
       return conversation;
@@ -124,6 +134,7 @@ function Sidebar({ rooms, myRooms, createRoom, joinRoom, renameRoom, deleteRoom,
       ...conversation,
       other_username: nextUsername,
       other_avatar_color: nextAvatarColor,
+      other_profile_picture: nextProfilePicture,
       other_npub: nextNpub,
     };
   }, [resolveDMUserMeta]);
@@ -135,6 +146,7 @@ function Sidebar({ rooms, myRooms, createRoom, joinRoom, renameRoom, deleteRoom,
       other_user_id: c.other_user_id,
       other_username: c.other_username,
       other_avatar_color: c.other_avatar_color,
+      other_profile_picture: c.other_profile_picture || null,
       other_npub: c.other_npub || null,
     }));
     setDMConversations(next);
@@ -166,6 +178,7 @@ function Sidebar({ rooms, myRooms, createRoom, joinRoom, renameRoom, deleteRoom,
       const otherId = msg.sender_id === user.userId ? msg.dm_partner_id : msg.sender_id;
       const fallbackUsername = msg.sender_id === user.userId ? null : msg.sender_name;
       const fallbackAvatarColor = msg.sender_id === user.userId ? null : msg.sender_color;
+      const fallbackProfilePicture = msg.sender_id === user.userId ? null : msg.sender_picture;
       const fallbackNpub = msg.sender_id === user.userId ? null : msg.sender_npub;
       if (msg.sender_id !== user.userId && msg.sender_npub) {
         rememberUserNpub(otherId, msg.sender_npub);
@@ -179,12 +192,14 @@ function Sidebar({ rooms, myRooms, createRoom, joinRoom, renameRoom, deleteRoom,
             other_user_id: otherId,
             other_username: fallbackUsername || otherId,
             other_avatar_color: fallbackAvatarColor || '#40FF40',
+            other_profile_picture: fallbackProfilePicture || null,
             other_npub: fallbackNpub || null,
           };
 
         const nextConversation = mergeDMConversationMeta(baseConversation, {
           username: fallbackUsername,
           avatarColor: fallbackAvatarColor,
+          profilePicture: fallbackProfilePicture,
           npub: fallbackNpub,
         });
 
@@ -218,6 +233,7 @@ function Sidebar({ rooms, myRooms, createRoom, joinRoom, renameRoom, deleteRoom,
         other_user_id: u.id,
         other_username: u.username,
         other_avatar_color: u.avatar_color,
+        other_profile_picture: u.profile_picture || u.profilePicture || null,
         other_npub: u.npub || null,
       }];
     });
@@ -326,7 +342,7 @@ function Sidebar({ rooms, myRooms, createRoom, joinRoom, renameRoom, deleteRoom,
           </div>
         </button>
         <button
-          onClick={logout}
+          onClick={() => { void confirmLogout(logout); }}
           title="Log out"
           style={{
             background: 'none',

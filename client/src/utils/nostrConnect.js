@@ -589,38 +589,19 @@ export function activateNsec(secretKey) {
 }
 
 /**
- * Persist nsec encrypted via Electron safeStorage.
+ * Runtime builds intentionally do not persist raw nsec keys across restarts.
  */
-export async function persistNsec(nsecStr) {
-  try {
-    if (window.electronCrypto && await window.electronCrypto.isEncryptionAvailable()) {
-      const encrypted = await window.electronCrypto.encryptString(nsecStr);
-      localStorage.setItem('nostr_nsec_enc', encrypted);
-      return;
-    }
-  } catch (err) {
-    console.warn('[nsec] Electron safeStorage unavailable or denied — nsec will not persist:', err);
-  }
-
-  console.warn('[nsec] Electron safeStorage unavailable — nsec will not persist');
+export async function persistNsec(_nsecStr) {
+  localStorage.removeItem('nostr_nsec_enc');
 }
 
 /**
- * Load and decrypt a stored nsec.
+ * Raw nsec keys are never restored from disk on startup.
  * @returns {Promise<{ secretKey: Uint8Array, pubkey: string, npub: string } | null>}
  */
 export async function loadNsec() {
-  try {
-    const encrypted = localStorage.getItem('nostr_nsec_enc');
-    if (!encrypted || !window.electronCrypto) return null;
-    const nsecStr = await window.electronCrypto.decryptString(encrypted);
-    if (!nsecStr || !nsecStr.startsWith('nsec1')) return null;
-    return decodeNsec(nsecStr);
-  } catch (err) {
-    console.warn('[nsec] Failed to load stored nsec:', err);
-    localStorage.removeItem('nostr_nsec_enc');
-    return null;
-  }
+  localStorage.removeItem('nostr_nsec_enc');
+  return null;
 }
 
 /**
@@ -659,71 +640,20 @@ export async function disconnect() {
 }
 
 // ---------------------------------------------------------------------------
-// Session persistence (encrypted via Electron safeStorage)
+// Session persistence is intentionally disabled in runtime builds.
 // ---------------------------------------------------------------------------
 
-async function _persistSession(bunkerPointer, clientSecretKey = _clientSecretKey) {
-  const sessionData = JSON.stringify({
-    bunkerPointer,
-    clientSecretKey: Array.from(clientSecretKey),
-  });
-
-  try {
-    if (window.electronCrypto && await window.electronCrypto.isEncryptionAvailable()) {
-      const encrypted = await window.electronCrypto.encryptString(sessionData);
-      localStorage.setItem('nostr_nip46_session_enc', encrypted);
-      localStorage.removeItem('nostr_nip46_session');
-      pushNip46Trace('session.persisted', {
-        bunkerPubkey: redactTraceValue(bunkerPointer?.pubkey),
-        relays: bunkerPointer?.relays || [],
-      });
-      return;
-    }
-  } catch (err) {
-    pushNip46Trace('session.persist_skipped', {
-      reason: 'safe_storage_denied',
-      error: summarizeError(err),
-    }, 'warn');
-    console.warn('[NIP-46] Electron safeStorage denied — session will not persist across restarts:', err);
-  }
-
-  // No safeStorage — cannot persist session securely. User will need to
-  // re-enter bunker URI on next app launch.
+async function _persistSession(bunkerPointer) {
+  _clearSession();
   pushNip46Trace('session.persist_skipped', {
-    reason: 'safe_storage_unavailable',
+    reason: 'disabled_in_build',
+    bunkerPubkey: redactTraceValue(bunkerPointer?.pubkey),
+    relays: bunkerPointer?.relays || [],
   }, 'warn');
-  console.warn('[NIP-46] Electron safeStorage unavailable — session will not persist across restarts');
 }
 
 async function _loadSession() {
-  try {
-    // Try encrypted storage
-    const encrypted = localStorage.getItem('nostr_nip46_session_enc');
-    if (encrypted && window.electronCrypto) {
-      const decrypted = await window.electronCrypto.decryptString(encrypted);
-      const parsed = JSON.parse(decrypted);
-
-      // Validate session structure
-      if (!parsed.bunkerPointer || !parsed.bunkerPointer.pubkey ||
-          !Array.isArray(parsed.bunkerPointer.relays) ||
-          !Array.isArray(parsed.clientSecretKey) || parsed.clientSecretKey.length !== 32) {
-        console.warn('[NIP-46] Stored session has invalid format, discarding');
-        _clearSession();
-        return null;
-      }
-
-      return {
-        bunkerPointer: parsed.bunkerPointer,
-        clientSecretKey: new Uint8Array(parsed.clientSecretKey),
-      };
-    }
-  } catch (err) {
-    pushNip46Trace('session.load.error', {
-      error: summarizeError(err),
-    }, 'warn');
-    console.warn('[NIP-46] Failed to load session:', err);
-    _clearSession();
-  }
+  _clearSession();
   return null;
 }
 
