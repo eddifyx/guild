@@ -1,10 +1,17 @@
 {
-  "version": "1.0.42",
+  "version": "1.0.43",
   "releasedAt": "2026-03-16",
   "patchNotes": {
-    "headline": "Faster chat, cleaner rooms, and better screen sharing",
-    "summary": "v1.0.42 makes DMs and room chat feel more immediate, cleans up historical room decryption UX, shows real profile pictures in the Messages list, adds logout confirmation, and pushes screen sharing harder on resolution and frame pacing.",
+    "headline": "Screen sharing fixed, plus chat and session polish",
+    "summary": "v1.0.43 fixes screen sharing startup on Mac and Windows, keeps app sessions intact across normal restarts, and carries forward the recent messaging, room-history, and UI improvements from the .42 pass.",
     "sections": [
+      {
+        "title": "Screen sharing",
+        "items": [
+          "Fixed a startup bug where screen sharing could fail immediately with a getDisplayMedia constraints error on both Mac and Windows.",
+          "Screen capture now requests a browser-supported profile first, then tightens quality on the active track after sharing starts."
+        ]
+      },
       {
         "title": "Messaging polish",
         "items": [
@@ -21,8 +28,9 @@
         ]
       },
       {
-        "title": "Streaming",
+        "title": "Session and streaming",
         "items": [
+          "Normal app restarts and updates no longer force an immediate sign-in again just because the signer is not already back in memory.",
           "Screen sharing now requests a more aggressive high-resolution capture profile before encoding, with stronger bitrate and frame pacing targets.",
           "Streaming is tuned to hold sharper detail and smoother motion more consistently on supported displays.",
           "Windows stays pinned to v1.0.40 until a real Windows-native build is published."
