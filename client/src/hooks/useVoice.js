@@ -2222,9 +2222,11 @@ export function useVoice() {
 
       const stream = await navigator.mediaDevices.getDisplayMedia({
         video: {
-          width: { ideal: SCREEN_SHARE_CAPTURE_IDEAL_WIDTH, min: 1280 },
-          height: { ideal: SCREEN_SHARE_CAPTURE_IDEAL_HEIGHT, min: 720 },
-          frameRate: { ideal: SCREEN_SHARE_TARGET_FPS, min: 24, max: SCREEN_SHARE_CAPTURE_MAX_FPS },
+          // Chromium/Electron rejects min/exact constraints on getDisplayMedia.
+          // Ask for the best capture we can here, then tighten on the track after capture starts.
+          width: { ideal: SCREEN_SHARE_CAPTURE_IDEAL_WIDTH, max: SCREEN_SHARE_CAPTURE_IDEAL_WIDTH },
+          height: { ideal: SCREEN_SHARE_CAPTURE_IDEAL_HEIGHT, max: SCREEN_SHARE_CAPTURE_IDEAL_HEIGHT },
+          frameRate: { ideal: SCREEN_SHARE_TARGET_FPS, max: SCREEN_SHARE_CAPTURE_MAX_FPS },
         },
         audio: includeAudio && !macAudioDeviceId,
       });
