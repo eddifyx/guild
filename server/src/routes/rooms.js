@@ -12,10 +12,16 @@ const {
   deleteSenderKeyDistributionsForRoom,
   deleteSenderKeyDistributionsForRecipientInRoom,
 } = require('../db');
+const {
+  BOARDS_DISABLED,
+  replyBoardsDisabled,
+} = require('../domain/messaging/boardAvailability');
+const { hasGuildPermission } = require('../utils/permissions');
 
 const router = express.Router();
 
 router.get('/', auth, (req, res) => {
+  if (BOARDS_DISABLED) return res.json([]);
   const { guildId } = req.query;
   if (!guildId) return res.status(400).json({ error: 'guildId is required' });
   const membership = isGuildMember.get(guildId, req.userId);
@@ -25,6 +31,7 @@ router.get('/', auth, (req, res) => {
 });
 
 router.get('/mine', auth, (req, res) => {
+  if (BOARDS_DISABLED) return res.json([]);
   const rooms = getUserRooms.all(req.userId);
   res.json(rooms);
 });
@@ -32,6 +39,7 @@ router.get('/mine', auth, (req, res) => {
 const MAX_ROOMS_PER_USER = 50;
 
 router.post('/', auth, (req, res) => {
+  if (BOARDS_DISABLED) return replyBoardsDisabled(res);
   const { name } = req.body;
   if (!name || !name.trim()) {
     return res.status(400).json({ error: 'Room name is required' });
@@ -54,8 +62,7 @@ router.post('/', auth, (req, res) => {
   if (!guildMembership) return res.status(403).json({ error: 'Not a member of this guild' });
 
   // Check manage_rooms permission
-  const perms = JSON.parse(guildMembership.permissions || '{}');
-  if (guildMembership.rank_order !== 0 && !perms.manage_rooms) {
+  if (!hasGuildPermission(guildMembership, 'manage_rooms')) {
     return res.status(403).json({ error: 'No permission to create rooms' });
   }
 
@@ -85,6 +92,7 @@ router.post('/', auth, (req, res) => {
 });
 
 router.post('/:id/join', auth, (req, res) => {
+  if (BOARDS_DISABLED) return replyBoardsDisabled(res);
   const room = getRoomById.get(req.params.id);
   if (!room) return res.status(404).json({ error: 'Room not found' });
 
@@ -99,6 +107,7 @@ router.post('/:id/join', auth, (req, res) => {
 });
 
 router.post('/:id/leave', auth, (req, res) => {
+  if (BOARDS_DISABLED) return replyBoardsDisabled(res);
   removeRoomMember.run(req.params.id, req.userId);
   deleteSenderKeyDistributionsForRecipientInRoom.run(req.params.id, req.userId);
 
@@ -116,6 +125,7 @@ router.post('/:id/leave', auth, (req, res) => {
 });
 
 router.get('/:id/members', auth, (req, res) => {
+  if (BOARDS_DISABLED) return replyBoardsDisabled(res);
   // Only room members can see the member list
   const member = isRoomMember.get(req.params.id, req.userId);
   if (!member) return res.status(403).json({ error: 'Not a member of this room' });
@@ -124,6 +134,7 @@ router.get('/:id/members', auth, (req, res) => {
 });
 
 router.get('/:id/sender-keys', auth, (req, res) => {
+  if (BOARDS_DISABLED) return replyBoardsDisabled(res);
   const member = isRoomMember.get(req.params.id, req.userId);
   if (!member) return res.status(403).json({ error: 'Not a member of this room' });
 
@@ -145,6 +156,7 @@ router.get('/:id/sender-keys', auth, (req, res) => {
 });
 
 router.post('/:id/sender-keys/ack', auth, (req, res) => {
+  if (BOARDS_DISABLED) return replyBoardsDisabled(res);
   const ids = Array.isArray(req.body?.ids)
     ? req.body.ids.filter((value) => typeof value === 'string').slice(0, 100)
     : [];
@@ -158,6 +170,7 @@ router.post('/:id/sender-keys/ack', auth, (req, res) => {
 
 // Rename room (creator only)
 router.put('/:id', auth, (req, res) => {
+  if (BOARDS_DISABLED) return replyBoardsDisabled(res);
   const room = getRoomById.get(req.params.id);
   if (!room) return res.status(404).json({ error: 'Room not found' });
   if (room.created_by !== req.userId) {
@@ -189,6 +202,7 @@ router.put('/:id', auth, (req, res) => {
 
 // Delete room (creator only)
 router.delete('/:id', auth, (req, res) => {
+  if (BOARDS_DISABLED) return replyBoardsDisabled(res);
   const room = getRoomById.get(req.params.id);
   if (!room) return res.status(404).json({ error: 'Room not found' });
   if (room.created_by !== req.userId) {

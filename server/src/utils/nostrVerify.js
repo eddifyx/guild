@@ -9,7 +9,13 @@
 const { schnorr } = require('@noble/curves/secp256k1');
 const { sha256 } = require('@noble/hashes/sha256');
 const { bytesToHex, hexToBytes } = require('@noble/hashes/utils');
-const { bech32 } = require('@scure/base');
+let cachedBech32 = null;
+async function getBech32() {
+  if (cachedBech32) return cachedBech32;
+  const mod = await import('@scure/base');
+  cachedBech32 = mod.bech32;
+  return cachedBech32;
+}
 
 /**
  * Verify a Nostr event's ID and Schnorr signature per NIP-01.
@@ -57,7 +63,8 @@ function verifyNostrEvent(event) {
  * @param {string} pubkeyHex — 64-char hex public key
  * @returns {string} npub1...
  */
-function pubkeyToNpub(pubkeyHex) {
+async function pubkeyToNpub(pubkeyHex) {
+  const bech32 = await getBech32();
   const data = hexToBytes(pubkeyHex);
   const words = bech32.toWords(data);
   return bech32.encode('npub', words, 90);
@@ -69,7 +76,8 @@ function pubkeyToNpub(pubkeyHex) {
  * @param {string} npub — npub1...
  * @returns {string} 64-char hex public key
  */
-function npubToPubkey(npub) {
+async function npubToPubkey(npub) {
+  const bech32 = await getBech32();
   const { prefix, words } = bech32.decode(npub, 90);
   if (prefix !== 'npub') throw new Error('Invalid npub prefix');
   return bytesToHex(bech32.fromWords(words));

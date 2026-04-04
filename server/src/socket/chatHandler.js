@@ -5,26 +5,68 @@ const {
   db,
   insertMessage, insertEncryptedMessage, insertAttachment, getUserById,
   ensureDMConversation, deleteDMConversation, isRoomMember, usersShareGuild,
+  isGuildMember, getGuildMembers,
   getMessageById, updateMessageContent, deleteMessage,
   deleteMessageAttachments, getMessageAttachments,
   getUploadedFileById, getOwnedUnclaimedUploadedFile, getUploadedFilesByMessageId,
-  claimUploadedFileForRoomMessage, claimUploadedFileForDMMessage,
+  claimUploadedFileForRoomMessage, claimUploadedFileForDMMessage, claimUploadedFileForGuildChatMessage,
   deleteUploadedFileRecord, upsertSenderKeyDistribution,
 } = require('../db');
+const { ERROR_CODES } = require('../contracts/errorCodes');
+const { buildGuildMemberState } = require('../domain/guild/capabilities');
+const {
+  buildGuildChatMessage,
+  getGuildChatPermissionFailure,
+  listGuildChatMentionRecipients,
+  resolveEffectiveGuildChatMentions,
+} = require('../domain/messaging/guildChat');
+const {
+  DM_UNAVAILABLE_ERROR,
+  buildDirectMessage,
+  buildDirectSenderKeyPayload,
+  buildRoomMessage,
+  canUsersDirectMessage,
+  getDirectMessageAvailabilityFailure,
+  validateDirectSenderKeyMetadata,
+} = require('../domain/messaging/directMessages');
+const { createGuildChatFlow } = require('../domain/messaging/guildChatFlow');
+const { createGuildChatRuntimeFlow } = require('../domain/messaging/guildChatRuntimeFlow');
+const { getBoardsAvailabilityFailure } = require('../domain/messaging/boardAvailability');
+const { createMessageAttachmentFlow } = require('../domain/messaging/messageAttachmentFlow');
+const { createMessageLifecycleFlow } = require('../domain/messaging/messageLifecycleFlow');
+const { createMessagePersistenceFlow } = require('../domain/messaging/messagePersistenceFlow');
+const { createRealtimeMessagingFlow } = require('../domain/messaging/realtimeMessagingFlow');
+const {
+  validateGuildChatGuildPayload,
+  validateGuildChatMessagePayload,
+} = require('./validators/guildChatPayloads');
 const runtimeMetrics = require('../monitoring/runtimeMetrics');
 
 const MAX_ATTACHMENTS = 10;
 const MAX_CONTENT_LENGTH = 64 * 1024; // 64KB max message content
-const MAX_FILESIZE = 200 * 1024 * 1024; // 200MB
+const MAX_ATTACHMENT_FILESIZE = 100 * 1024 * 1024; // 100MB, matches encrypted upload limit
+const MAX_GUILDCHAT_FILESIZE = 25 * 1024 * 1024; // 25MB
+const MAX_LIVE_GUILDCHAT_MESSAGES = 200;
 const UPLOAD_ID_PATTERN = /^[0-9a-f-]{36}$/i;
 
 const SOCKET_RL_WINDOW = 10000;
 const SOCKET_RL_MAX_MESSAGES = 30;
 const SOCKET_RL_MAX_TYPING = 10;
-const DM_UNAVAILABLE_ERROR = 'Direct messages are only available while you share a guild with this user.';
+const GUILDCHAT_RUNTIME_GRACE_MS = 60 * 1000;
+const guildChatRoom = (guildId) => `guildchat:${guildId}`;
+
+const guildChatRuntimeFlow = createGuildChatRuntimeFlow({
+  deleteUploadedFileRecord,
+  unlinkStoredFile: (storedName) => {
+    fs.unlinkSync(path.join(__dirname, '..', '..', 'uploads', path.basename(storedName)));
+  },
+  maxLiveMessages: MAX_LIVE_GUILDCHAT_MESSAGES,
+  graceMs: GUILDCHAT_RUNTIME_GRACE_MS,
+});
 
 function handleChat(io, socket) {
   const { userId, username } = socket.handshake.auth;
+  const joinedGuildChats = new Set();
 
   const _rl = { messages: { count: 0, reset: Date.now() + SOCKET_RL_WINDOW }, typing: { count: 0, reset: Date.now() + SOCKET_RL_WINDOW } };
   function checkRate(bucket, max) {
@@ -35,7 +77,63 @@ function handleChat(io, socket) {
   }
 
   function canUseDirectMessages(otherUserId) {
-    return !!usersShareGuild.get(userId, otherUserId);
+    return canUsersDirectMessage(usersShareGuild.get(userId, otherUserId));
+  }
+
+  function ensureDirectMessagesAvailable(otherUserId, ack) {
+    const availability = getDirectMessageAvailabilityFailure(canUseDirectMessages(otherUserId));
+    if (availability.ok) {
+      return true;
+    }
+    ack({ ok: false, error: availability.error || DM_UNAVAILABLE_ERROR });
+    return false;
+  }
+
+  function ensureBoardsAvailable(ack) {
+    const availability = getBoardsAvailabilityFailure();
+    if (availability.ok) {
+      return true;
+    }
+    ack({ ok: false, error: availability.error, code: availability.code });
+    return false;
+  }
+
+  function getGuildMemberWithPerms(guildId, targetUserId = userId) {
+    return buildGuildMemberState(isGuildMember.get(guildId, targetUserId));
+  }
+
+  function ensureGuildChatPermission(member, permKey, ack, errorMessage) {
+    const permissionCheck = getGuildChatPermissionFailure(member, permKey);
+    if (permissionCheck.ok) {
+      return true;
+    }
+    runtimeMetrics.recordChatEvent('guildchat:permission_denied', {
+      userId,
+      guildId: member?.guild_id || null,
+      permissionKey: permKey,
+      code: permissionCheck.code || ERROR_CODES.GUILD_PERMISSION_DENIED,
+    });
+    ack({
+      ok: false,
+      error: permissionCheck.error || errorMessage,
+      code: permissionCheck.code || ERROR_CODES.GUILD_PERMISSION_DENIED,
+    });
+    return false;
+  }
+
+  function rejectInvalidGuildChatPayload(eventName, validation, ack) {
+    runtimeMetrics.recordChatEvent('guildchat:invalid_payload', {
+      userId,
+      event: eventName,
+      guildId: validation?.value?.guildId || null,
+      code: validation?.code || ERROR_CODES.INVALID_GUILDCHAT_PAYLOAD,
+      reason: validation?.error || 'Invalid payload',
+    });
+    ack({
+      ok: false,
+      error: validation?.error || 'Invalid payload',
+      code: validation?.code || ERROR_CODES.INVALID_GUILDCHAT_PAYLOAD,
+    });
   }
 
   function safe(handler) {
@@ -58,426 +156,123 @@ function handleChat(io, socket) {
     };
   }
 
-  function sanitizeAttachmentRefs(attachments) {
-    if (!attachments) return [];
-    if (!Array.isArray(attachments)) return null;
-    const normalized = attachments.slice(0, MAX_ATTACHMENTS).map(att => ({
-      fileId: typeof att?.fileId === 'string' ? att.fileId.trim() : null,
-    })).filter(att => att.fileId && UPLOAD_ID_PATTERN.test(att.fileId));
-    return normalized;
-  }
-
-  function claimUploadedAttachments(messageId, attachmentRefs, scope) {
-    if (!attachmentRefs || attachmentRefs.length === 0) return [];
-
-    const savedAttachments = [];
-    for (const ref of attachmentRefs) {
-      const upload = getOwnedUnclaimedUploadedFile.get(ref.fileId, userId);
-      if (!upload) {
-        throw new Error('Attachment upload is missing, already used, or not owned by this sender');
-      }
-      if (upload.file_size > MAX_FILESIZE) {
-        throw new Error('Attachment exceeds the maximum allowed file size');
-      }
-
-      let claimResult;
-      if (scope.type === 'room') {
-        claimResult = claimUploadedFileForRoomMessage.run(messageId, scope.roomId, upload.id, userId);
-      } else {
-        claimResult = claimUploadedFileForDMMessage.run(messageId, scope.dmUserA, scope.dmUserB, upload.id, userId);
-      }
-
-      if (!claimResult?.changes) {
-        throw new Error('Failed to claim uploaded attachment for this conversation');
-      }
-
-      const attachmentId = uuidv4();
-      const fileUrl = `/api/files/${upload.id}`;
-      insertAttachment.run(
-        attachmentId,
-        messageId,
-        upload.id,
-        fileUrl,
-        upload.file_name,
-        upload.file_type,
-        upload.file_size
-      );
-      savedAttachments.push({
-        id: attachmentId,
-        uploaded_file_id: upload.id,
-        fileUrl,
-        fileName: upload.file_name,
-        fileType: upload.file_type,
-        fileSize: upload.file_size,
-      });
-    }
-
-    return savedAttachments;
-  }
-
-  const persistRoomMessage = db.transaction(({ msgId, roomId, content, encrypted, attachmentRefs }) => {
-    if (encrypted) {
-      insertEncryptedMessage.run(msgId, content, userId, roomId, null, 1);
-    } else {
-      insertMessage.run(msgId, content || null, userId, roomId, null);
-    }
-    return claimUploadedAttachments(msgId, attachmentRefs, { type: 'room', roomId });
+  const messageAttachmentFlow = createMessageAttachmentFlow({
+    userId,
+    maxAttachments: MAX_ATTACHMENTS,
+    maxAttachmentFileSize: MAX_ATTACHMENT_FILESIZE,
+    maxGuildChatFileSize: MAX_GUILDCHAT_FILESIZE,
+    uploadIdPattern: UPLOAD_ID_PATTERN,
+    uuidGenerator: uuidv4,
+    getOwnedUnclaimedUploadedFile,
+    claimUploadedFileForRoomMessage,
+    claimUploadedFileForDMMessage,
+    claimUploadedFileForGuildChatMessage,
+    insertAttachment,
   });
 
-  const persistDMMessage = db.transaction(({ msgId, toUserId, content, encrypted, attachmentRefs }) => {
-    if (encrypted) {
-      insertEncryptedMessage.run(msgId, content, userId, null, toUserId, 1);
-    } else {
-      insertMessage.run(msgId, content || null, userId, null, toUserId);
-    }
-
-    const [a, b] = userId < toUserId ? [userId, toUserId] : [toUserId, userId];
-    ensureDMConversation.run(a, b);
-    return claimUploadedAttachments(msgId, attachmentRefs, { type: 'dm', dmUserA: a, dmUserB: b });
+  const messagePersistenceFlow = createMessagePersistenceFlow({
+    db,
+    userId,
+    insertMessage,
+    insertEncryptedMessage,
+    ensureDMConversation,
+    deleteMessageAttachments,
+    deleteUploadedFileRecord,
+    deleteMessage,
+    claimUploadedAttachments: messageAttachmentFlow.claimUploadedAttachments,
   });
 
-  const deleteMessageWithUploads = db.transaction(({ messageId, senderId, uploadedFileIds }) => {
-    deleteMessageAttachments.run(messageId);
-    for (const uploadId of uploadedFileIds) {
-      deleteUploadedFileRecord.run(uploadId);
-    }
-
-    const result = deleteMessage.run(messageId, senderId);
-    if (!result?.changes) {
-      throw new Error('Delete not permitted');
-    }
-
-    return result;
+  const realtimeMessagingFlow = createRealtimeMessagingFlow({
+    io,
+    socket,
+    userId,
+    username,
+    checkMessageRate: () => checkRate(_rl.messages, SOCKET_RL_MAX_MESSAGES),
+    checkTypingRate: () => checkRate(_rl.typing, SOCKET_RL_MAX_TYPING),
+    maxContentLength: MAX_CONTENT_LENGTH,
+    maxAttachments: MAX_ATTACHMENTS,
+    isRoomMember,
+    getUserById,
+    ensureDirectMessagesAvailable,
+    ensureBoardsAvailable,
+    sanitizeAttachmentRefs: messageAttachmentFlow.sanitizeAttachmentRefs,
+    persistRoomMessage: messagePersistenceFlow.persistRoomMessage,
+    persistDMMessage: messagePersistenceFlow.persistDirectMessage,
+    upsertSenderKeyDistribution,
+    buildRoomMessage,
+    buildDirectMessage,
+    buildDirectSenderKeyPayload,
+    validateDirectSenderKeyMetadata,
+    runtimeMetrics,
+    uuidGenerator: uuidv4,
+    getStoredMessageById: (messageId) => getMessageById.get(messageId),
   });
 
-  socket.on('room:join', safe(({ roomId }, ack) => {
-    if (!roomId) return ack({ ok: false, error: 'Room ID required' });
-    const member = isRoomMember.get(roomId, userId);
-    if (!member) return ack({ ok: false, error: 'Not a member of this room' });
-    socket.join(`room:${roomId}`);
-    io.to(`room:${roomId}`).emit('room:user_joined', { roomId, userId, username });
-    ack({ ok: true });
-  }));
+  const guildChatFlow = createGuildChatFlow({
+    io,
+    socket,
+    userId,
+    username,
+    joinedGuildChats,
+    guildChatRoom,
+    cancelGuildChatCleanup: guildChatRuntimeFlow.cancelCleanup,
+    scheduleGuildChatCleanup: (targetIo, guildId) => guildChatRuntimeFlow.scheduleCleanup(targetIo, guildId, guildChatRoom),
+    rejectInvalidGuildChatPayload,
+    validateGuildChatGuildPayload,
+    validateGuildChatMessagePayload,
+    getGuildMemberWithPerms,
+    ensureGuildChatPermission,
+    checkMessageRate: () => checkRate(_rl.messages, SOCKET_RL_MAX_MESSAGES),
+    checkTypingRate: () => checkRate(_rl.typing, SOCKET_RL_MAX_TYPING),
+    maxAttachments: MAX_ATTACHMENTS,
+    maxContentLength: MAX_CONTENT_LENGTH,
+    sanitizeGuildChatAttachmentRefs: messageAttachmentFlow.sanitizeGuildChatAttachmentRefs,
+    getGuildMembers,
+    resolveEffectiveGuildChatMentions,
+    getUserById,
+    claimGuildChatAttachments: messageAttachmentFlow.claimGuildChatAttachments,
+    buildGuildChatMessage,
+    trackGuildChatAttachments: guildChatRuntimeFlow.trackAttachments,
+    listGuildChatMentionRecipients,
+    runtimeMetrics,
+    createMessageId: uuidv4,
+  });
 
-  socket.on('room:leave', safe(({ roomId }, ack) => {
-    if (!roomId) return ack({ ok: false, error: 'Room ID required' });
-    const member = isRoomMember.get(roomId, userId);
-    socket.leave(`room:${roomId}`);
-    if (member) {
-      io.to(`room:${roomId}`).emit('room:user_left', { roomId, userId, username });
-    }
-    ack({ ok: true });
-  }));
+  const messageLifecycleFlow = createMessageLifecycleFlow({
+    io,
+    userId,
+    maxContentLength: MAX_CONTENT_LENGTH,
+    getMessageById,
+    updateMessageContent,
+    getMessageAttachments,
+    getUploadedFilesByMessageId,
+    deleteMessageWithUploads: messagePersistenceFlow.deleteMessageWithUploads,
+    deleteDMConversation,
+    buildUploadFilePath: (rawPath) => path.join(__dirname, '..', '..', 'uploads', path.basename(rawPath)),
+    unlinkFile: (filePath) => fs.unlink(filePath, () => {}),
+  });
 
-  socket.on('room:message', safe(({ roomId, content, attachments, encrypted }, ack) => {
-    if (!roomId) return ack({ ok: false, error: 'Room ID required' });
-    if (!checkRate(_rl.messages, SOCKET_RL_MAX_MESSAGES)) return ack({ ok: false, error: 'Rate limit exceeded' });
-    if (content && typeof content === 'string' && content.length > MAX_CONTENT_LENGTH) {
-      return ack({ ok: false, error: 'Message is too large' });
-    }
-    const member = isRoomMember.get(roomId, userId);
-    if (!member) return ack({ ok: false, error: 'Not a member of this room' });
-    if (encrypted && (!content || typeof content !== 'string')) {
-      return ack({ ok: false, error: 'Encrypted payload required' });
-    }
+  socket.on('room:join', safe(realtimeMessagingFlow.handleRoomJoin));
+  socket.on('room:leave', safe(realtimeMessagingFlow.handleRoomLeave));
+  socket.on('room:message', safe(realtimeMessagingFlow.handleRoomMessage));
+  socket.on('dm:message', safe(realtimeMessagingFlow.handleDirectMessage));
+  socket.on('dm:sender_key', safe(realtimeMessagingFlow.handleDirectSenderKey));
+  socket.on('room:request_sender_key', safe(realtimeMessagingFlow.handleRoomRequestSenderKey));
 
-    const safeAttachments = sanitizeAttachmentRefs(attachments);
-    if (attachments && safeAttachments === null) {
-      return ack({ ok: false, error: 'Invalid attachment payload' });
-    }
-    if (Array.isArray(attachments) && safeAttachments.length !== attachments.slice(0, MAX_ATTACHMENTS).length) {
-      return ack({ ok: false, error: 'Invalid attachment reference' });
-    }
+  socket.on('guildchat:join', safe(guildChatFlow.handleJoin));
+  socket.on('guildchat:leave', safe(guildChatFlow.handleLeave));
+  socket.on('guildchat:message', safe(guildChatFlow.handleMessage));
+  socket.on('guildchat:typing:start', safe(guildChatFlow.handleTypingStart));
+  socket.on('guildchat:typing:stop', safe(guildChatFlow.handleTypingStop));
 
-    const msgId = uuidv4();
-    let savedAttachments;
-    try {
-      savedAttachments = persistRoomMessage({
-        msgId,
-        roomId,
-        content,
-        encrypted,
-        attachmentRefs: safeAttachments,
-      });
-    } catch (err) {
-      return ack({ ok: false, error: err.message || 'Failed to attach uploaded file' });
-    }
+  socket.on('disconnect', guildChatFlow.handleDisconnect);
 
-    const user = getUserById.get(userId);
-    if (!user) return ack({ ok: false, error: 'Sender not found' });
+  socket.on('message:edit', safe(messageLifecycleFlow.handleEdit));
+  socket.on('message:delete', safe(messageLifecycleFlow.handleDelete));
+  socket.on('dm:conversation:delete', safe(messageLifecycleFlow.handleDeleteConversation));
 
-    const stored = getMessageById.get(msgId);
-    const message = {
-      id: msgId,
-      content: content || null,
-      sender_id: userId,
-      sender_name: user.username,
-      sender_color: user.avatar_color,
-      sender_npub: user.npub || null,
-      sender_picture: user.profile_picture || null,
-      room_id: roomId,
-      dm_partner_id: null,
-      attachments: savedAttachments,
-      created_at: stored ? stored.created_at : new Date().toISOString().replace('T', ' ').slice(0, 19),
-      encrypted: encrypted ? 1 : 0,
-    };
-
-    io.to(`room:${roomId}`).emit('room:message', message);
-    runtimeMetrics.recordChatMessage('room', {
-      roomId,
-      encrypted: !!encrypted,
-      attachmentCount: savedAttachments.length,
-    });
-    ack({ ok: true, messageId: msgId });
-  }));
-
-  socket.on('dm:message', safe(({ toUserId, content, attachments, encrypted }, ack) => {
-    if (!toUserId) return ack({ ok: false, error: 'Recipient required' });
-    if (!checkRate(_rl.messages, SOCKET_RL_MAX_MESSAGES)) return ack({ ok: false, error: 'Rate limit exceeded' });
-    if (content && typeof content === 'string' && content.length > MAX_CONTENT_LENGTH) {
-      return ack({ ok: false, error: 'Message is too large' });
-    }
-
-    const recipient = getUserById.get(toUserId);
-    if (!recipient) return ack({ ok: false, error: 'Recipient not found' });
-    if (!canUseDirectMessages(toUserId)) {
-      return ack({ ok: false, error: DM_UNAVAILABLE_ERROR });
-    }
-    if (encrypted && (!content || typeof content !== 'string')) {
-      return ack({ ok: false, error: 'Encrypted payload required' });
-    }
-
-    const safeAttachments = sanitizeAttachmentRefs(attachments);
-    if (attachments && safeAttachments === null) {
-      return ack({ ok: false, error: 'Invalid attachment payload' });
-    }
-    if (Array.isArray(attachments) && safeAttachments.length !== attachments.slice(0, MAX_ATTACHMENTS).length) {
-      return ack({ ok: false, error: 'Invalid attachment reference' });
-    }
-
-    const msgId = uuidv4();
-    let savedAttachments;
-    try {
-      savedAttachments = persistDMMessage({
-        msgId,
-        toUserId,
-        content,
-        encrypted,
-        attachmentRefs: safeAttachments,
-      });
-    } catch (err) {
-      return ack({ ok: false, error: err.message || 'Failed to attach uploaded file' });
-    }
-
-    const user = getUserById.get(userId);
-    if (!user) return ack({ ok: false, error: 'Sender not found' });
-
-    const stored = getMessageById.get(msgId);
-    const message = {
-      id: msgId,
-      content: content || null,
-      sender_id: userId,
-      sender_name: user.username,
-      sender_color: user.avatar_color,
-      sender_npub: user.npub || null,
-      sender_picture: user.profile_picture || null,
-      room_id: null,
-      dm_partner_id: toUserId,
-      attachments: savedAttachments,
-      created_at: stored ? stored.created_at : new Date().toISOString().replace('T', ' ').slice(0, 19),
-      encrypted: encrypted ? 1 : 0,
-    };
-
-    io.to(`user:${toUserId}`).emit('dm:message', message);
-    io.to(`user:${userId}`).emit('dm:message', message);
-    runtimeMetrics.recordChatMessage('dm', {
-      toUserId,
-      encrypted: !!encrypted,
-      attachmentCount: savedAttachments.length,
-    });
-    ack({ ok: true, messageId: msgId });
-  }));
-
-  socket.on('dm:sender_key', safe(({ toUserId, envelope, roomId = null, distributionId = null }, ack) => {
-    if (!toUserId || !envelope) return ack({ ok: false, error: 'Recipient and envelope required' });
-    if (!checkRate(_rl.messages, SOCKET_RL_MAX_MESSAGES)) return ack({ ok: false, error: 'Rate limit exceeded' });
-    const recipient = getUserById.get(toUserId);
-    if (!recipient) return ack({ ok: false, error: 'Recipient not found' });
-    if (!canUseDirectMessages(toUserId)) {
-      return ack({ ok: false, error: DM_UNAVAILABLE_ERROR });
-    }
-    if (typeof envelope !== 'string' || envelope.length > MAX_CONTENT_LENGTH) {
-      return ack({ ok: false, error: 'Invalid sender key envelope' });
-    }
-    const sender = getUserById.get(userId);
-    let controlMessageId = null;
-    if (roomId !== null || distributionId !== null) {
-      if (typeof roomId !== 'string' || !roomId || typeof distributionId !== 'string' || !distributionId) {
-        return ack({ ok: false, error: 'Invalid sender key metadata' });
-      }
-      if (!isRoomMember.get(roomId, userId) || !isRoomMember.get(roomId, toUserId)) {
-        return ack({ ok: false, error: 'Sender key metadata does not match room membership' });
-      }
-      controlMessageId = uuidv4();
-      upsertSenderKeyDistribution.run(
-        controlMessageId,
-        roomId,
-        userId,
-        toUserId,
-        distributionId,
-        envelope
-      );
-    }
-    io.to(`user:${toUserId}`).emit('dm:sender_key', {
-      id: controlMessageId,
-      fromUserId: userId,
-      senderNpub: sender?.npub || null,
-      envelope,
-      roomId,
-      distributionId,
-    });
-    ack({ ok: true });
-  }));
-
-  socket.on('room:request_sender_key', safe(({ roomId, senderUserId }, ack) => {
-    if (!roomId || !senderUserId) {
-      return ack({ ok: false, error: 'Room ID and sender user ID are required' });
-    }
-    if (!checkRate(_rl.messages, SOCKET_RL_MAX_MESSAGES)) {
-      return ack({ ok: false, error: 'Rate limit exceeded' });
-    }
-    if (!isRoomMember.get(roomId, userId)) {
-      return ack({ ok: false, error: 'Not a member of this room' });
-    }
-    if (!isRoomMember.get(roomId, senderUserId)) {
-      return ack({ ok: false, error: 'Requested sender is not a member of this room' });
-    }
-
-    io.to(`user:${senderUserId}`).emit('room:sender_key_requested', {
-      roomId,
-      requestedByUserId: userId,
-    });
-    ack({ ok: true });
-  }));
-
-  socket.on('message:edit', safe(({ messageId, content }, ack) => {
-    if (!messageId) return ack({ ok: false, error: 'Message ID required' });
-    if (content && typeof content === 'string' && content.length > MAX_CONTENT_LENGTH) {
-      return ack({ ok: false, error: 'Message is too large' });
-    }
-
-    const existing = getMessageById.get(messageId);
-    if (!existing) return ack({ ok: false, error: 'Message not found' });
-    if (existing.encrypted) return ack({ ok: false, error: 'Encrypted messages cannot be edited' });
-
-    const result = updateMessageContent.run(content, messageId, userId);
-    if (result.changes === 0) return ack({ ok: false, error: 'Edit not permitted' });
-
-    const msg = getMessageById.get(messageId);
-    if (!msg) return ack({ ok: false, error: 'Message not found after edit' });
-
-    const payload = { messageId, content: msg.content, edited_at: msg.edited_at };
-    if (msg.room_id) {
-      io.to(`room:${msg.room_id}`).emit('message:edited', payload);
-    } else {
-      io.to(`user:${msg.dm_partner_id}`).emit('message:edited', payload);
-      io.to(`user:${userId}`).emit('message:edited', payload);
-    }
-    ack({ ok: true });
-  }));
-
-  socket.on('message:delete', safe(({ messageId }, ack) => {
-    if (!messageId) return ack({ ok: false, error: 'Message ID required' });
-    const msg = getMessageById.get(messageId);
-    if (!msg || msg.sender_id !== userId) return ack({ ok: false, error: 'Delete not permitted' });
-
-    const attachments = getMessageAttachments.all(messageId);
-    const uploadedFiles = getUploadedFilesByMessageId.all(messageId);
-    const uploadedFileIds = new Set();
-    const filePathsToUnlink = new Set();
-
-    for (const att of attachments) {
-      if (att.uploaded_file_id) {
-        uploadedFileIds.add(att.uploaded_file_id);
-        continue;
-      }
-      if (att.file_url) {
-        filePathsToUnlink.add(path.join(__dirname, '..', '..', 'uploads', path.basename(att.file_url)));
-      }
-    }
-
-    for (const upload of uploadedFiles) {
-      if (!upload?.id) continue;
-      uploadedFileIds.add(upload.id);
-      if (upload.stored_name) {
-        filePathsToUnlink.add(path.join(__dirname, '..', '..', 'uploads', path.basename(upload.stored_name)));
-      }
-    }
-
-    try {
-      deleteMessageWithUploads({
-        messageId,
-        senderId: userId,
-        uploadedFileIds: Array.from(uploadedFileIds),
-      });
-    } catch (err) {
-      console.error('Failed to delete message:', err);
-      return ack({ ok: false, error: err.message || 'Failed to delete message' });
-    }
-
-    for (const filePath of filePathsToUnlink) {
-      fs.unlink(filePath, () => {});
-    }
-
-    if (msg.room_id) {
-      io.to('room:' + msg.room_id).emit('message:deleted', { messageId });
-    } else {
-      io.to('user:' + msg.dm_partner_id).emit('message:deleted', { messageId });
-      io.to('user:' + userId).emit('message:deleted', { messageId });
-    }
-    ack({ ok: true });
-  }));
-
-  socket.on('dm:conversation:delete', safe(({ otherUserId }, ack) => {
-    if (!otherUserId) return ack({ ok: false, error: 'Recipient required' });
-    const [a, b] = userId < otherUserId ? [userId, otherUserId] : [otherUserId, userId];
-    deleteDMConversation.run(a, b, a, b);
-    ack({ ok: true });
-  }));
-
-  socket.on('typing:start', safe(({ roomId, toUserId }, ack) => {
-    if (!checkRate(_rl.typing, SOCKET_RL_MAX_TYPING)) return ack({ ok: false, error: 'Rate limit exceeded' });
-    if (roomId) {
-      const member = isRoomMember.get(roomId, userId);
-      if (!member) return ack({ ok: false, error: 'Not a member of this room' });
-      socket.to(`room:${roomId}`).emit('typing:start', { userId, username, roomId });
-      return ack({ ok: true });
-    }
-    if (toUserId) {
-      if (!canUseDirectMessages(toUserId)) {
-        return ack({ ok: false, error: DM_UNAVAILABLE_ERROR });
-      }
-      io.to(`user:${toUserId}`).emit('typing:start', { userId, username, toUserId });
-    }
-    ack({ ok: true });
-  }));
-
-  socket.on('typing:stop', safe(({ roomId, toUserId }, ack) => {
-    if (!checkRate(_rl.typing, SOCKET_RL_MAX_TYPING)) return ack({ ok: false, error: 'Rate limit exceeded' });
-    if (roomId) {
-      const member = isRoomMember.get(roomId, userId);
-      if (!member) return ack({ ok: false, error: 'Not a member of this room' });
-      socket.to(`room:${roomId}`).emit('typing:stop', { userId, username, roomId });
-      return ack({ ok: true });
-    }
-    if (toUserId) {
-      if (!canUseDirectMessages(toUserId)) {
-        return ack({ ok: false, error: DM_UNAVAILABLE_ERROR });
-      }
-      io.to(`user:${toUserId}`).emit('typing:stop', { userId, username, toUserId });
-    }
-    ack({ ok: true });
-  }));
+  socket.on('typing:start', safe(realtimeMessagingFlow.handleTypingStart));
+  socket.on('typing:stop', safe(realtimeMessagingFlow.handleTypingStop));
 }
 
 module.exports = { handleChat };

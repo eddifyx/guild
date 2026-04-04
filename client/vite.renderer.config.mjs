@@ -21,7 +21,7 @@ export default defineConfig(() => {
   const rendererPort = getRendererPort();
 
   return {
-    plugins: [pluginExposeRenderer('main_window'), react()],
+    plugins: [pluginExposeRenderer('main_window'), react({ jsxRuntime: 'automatic' })],
     server: rendererPort
       ? {
           port: rendererPort,

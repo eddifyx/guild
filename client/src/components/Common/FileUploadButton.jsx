@@ -1,18 +1,24 @@
-import { useRef, useState } from 'react';
+import React, { useRef, useState } from 'react';
 import { uploadChatAttachment } from '../../utils/chatUploads';
 
-export default function FileUploadButton({ onUploaded, onError }) {
+export default function FileUploadButton({ onUploaded, onError, beforeUpload = null, multiple = false }) {
   const inputRef = useRef(null);
   const [uploading, setUploading] = useState(false);
 
   const handleChange = async (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
+    const selectedFiles = Array.from(e.target.files || []).filter(Boolean);
+    if (selectedFiles.length === 0) return;
 
     setUploading(true);
     try {
-      const result = await uploadChatAttachment(file);
-      onUploaded(result);
+      for (const file of selectedFiles) {
+        const validationError = typeof beforeUpload === 'function' ? beforeUpload(file) : null;
+        if (validationError) {
+          throw new Error(validationError);
+        }
+        const result = await uploadChatAttachment(file);
+        onUploaded(result);
+      }
     } catch (err) {
       console.error('Upload failed:', err);
       const message = err?.message || 'Upload failed';
@@ -28,6 +34,7 @@ export default function FileUploadButton({ onUploaded, onError }) {
       <input
         ref={inputRef}
         type="file"
+        multiple={multiple}
         onChange={handleChange}
         style={{ display: 'none' }}
       />

@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import React, { useEffect } from 'react';
 
 export default function Modal({ onClose, title, children }) {
   useEffect(() => {
@@ -11,6 +11,7 @@ export default function Modal({ onClose, title, children }) {
 
   return (
     <div
+      data-modal-root="true"
       onClick={onClose}
       style={{
         position: 'fixed',

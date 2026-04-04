@@ -9,14 +9,21 @@
  */
 
 import {
-  aes256GcmEncrypt,
-  aes256GcmDecrypt,
   randomBytes,
   toBase64,
   fromBase64,
 } from './primitives.js';
 import { encryptDirectMessage } from './messageEncryption.js';
 import { getCurrentUserId } from './sessionManager.js';
+import {
+  decryptVoiceFrameData,
+  encryptVoiceFrameData,
+  shouldFailOpenVoiceAudio,
+} from '../features/crypto/voiceFrameRuntime.mjs';
+import {
+  distributeVoiceKeyRuntime,
+  processDecryptedVoiceKeyRuntime,
+} from '../features/crypto/voiceKeyDistributionRuntime.mjs';
 
 let _voiceKey = null;
 let _voiceChannelId = null;
@@ -26,18 +33,7 @@ let _voiceChannelParticipants = new Set();
 let _prevVoiceKey = null;
 let _prevVoiceKeyEpoch = 0;
 let _prevKeyTimer = null;
-
-function emitVoiceKeyEnvelope(socket, toUserId, envelope) {
-  return new Promise((resolve, reject) => {
-    socket.emit('dm:sender_key', { toUserId, envelope }, (response) => {
-      if (response?.ok) {
-        resolve();
-        return;
-      }
-      reject(new Error(response?.error || 'Voice key delivery was rejected by the server.'));
-    });
-  });
-}
+const VOICE_AUDIO_FAIL_OPEN = import.meta.env.VITE_VOICE_AUDIO_FAIL_OPEN === '1';
 
 export function generateVoiceKey({ minEpoch = null } = {}) {
   if (Number.isInteger(minEpoch) && minEpoch > _voiceKeyEpoch) {
@@ -153,36 +149,27 @@ export function addVoiceChannelParticipant(userId) {
   }
 }
 
-const UNENCRYPTED_HEADER_BYTES = 1;
-
-export function encryptFrame(frame, controller) {
+export function encryptFrame(frame, controller, options = {}) {
   if (!_voiceKey) {
+    if (shouldFailOpenVoiceAudio({ frame, options, failOpenAudio: VOICE_AUDIO_FAIL_OPEN })) {
+      controller.enqueue(frame);
+    }
     return;
   }
-
-  const data = new Uint8Array(frame.data);
-  if (data.length === 0) {
-    controller.enqueue(frame);
-    return;
-  }
-
-  const header = data.slice(0, UNENCRYPTED_HEADER_BYTES);
-  const payload = data.slice(UNENCRYPTED_HEADER_BYTES);
 
   try {
-    const epochBytes = new Uint8Array(2);
-    epochBytes[0] = _voiceKeyEpoch & 0xff;
-    epochBytes[1] = (_voiceKeyEpoch >> 8) & 0xff;
-
-    const aad = new TextEncoder().encode(`${_voiceChannelId}:${_voiceKeyEpoch}`);
-    const { ciphertext, nonce } = aes256GcmEncrypt(_voiceKey, payload, aad);
-
-    const encrypted = new Uint8Array(header.length + 2 + 12 + ciphertext.length);
-    encrypted.set(header, 0);
-    encrypted.set(epochBytes, header.length);
-    encrypted.set(nonce, header.length + 2);
-    encrypted.set(ciphertext, header.length + 2 + 12);
-
+    const encrypted = encryptVoiceFrameData({
+      frameData: frame.data,
+      frame,
+      options,
+      key: _voiceKey,
+      epoch: _voiceKeyEpoch,
+      channelId: _voiceChannelId,
+    });
+    if (!encrypted) {
+      controller.enqueue(frame);
+      return;
+    }
     frame.data = encrypted.buffer;
     controller.enqueue(frame);
   } catch {
@@ -190,125 +177,112 @@ export function encryptFrame(frame, controller) {
   }
 }
 
-export function decryptFrame(frame, controller) {
+export function decryptFrame(frame, controller, options = {}) {
   if (!_voiceKey) {
+    if (shouldFailOpenVoiceAudio({ frame, options, failOpenAudio: VOICE_AUDIO_FAIL_OPEN })) {
+      controller.enqueue(frame);
+    }
     return;
   }
-
-  const data = new Uint8Array(frame.data);
-  if (data.length < 32) {
-    return;
-  }
-
-  const header = data.slice(0, UNENCRYPTED_HEADER_BYTES);
-  const frameEpoch = data[UNENCRYPTED_HEADER_BYTES] | (data[UNENCRYPTED_HEADER_BYTES + 1] << 8);
-  const nonce = data.slice(UNENCRYPTED_HEADER_BYTES + 2, UNENCRYPTED_HEADER_BYTES + 14);
-  const ciphertext = data.slice(UNENCRYPTED_HEADER_BYTES + 14);
-
-  let key = null;
-  let epoch = frameEpoch;
-  if (frameEpoch === _voiceKeyEpoch) {
-    key = _voiceKey;
-  } else if (_prevVoiceKey && frameEpoch === _prevVoiceKeyEpoch) {
-    key = _prevVoiceKey;
-  } else {
-    key = _voiceKey;
-    epoch = _voiceKeyEpoch;
-  }
-
-  const aad = new TextEncoder().encode(`${_voiceChannelId}:${epoch}`);
 
   try {
-    const plaintext = aes256GcmDecrypt(key, ciphertext, nonce, aad);
-    const decrypted = new Uint8Array(header.length + plaintext.length);
-    decrypted.set(header, 0);
-    decrypted.set(plaintext, header.length);
+    const decrypted = decryptVoiceFrameData({
+      frameData: frame.data,
+      frame,
+      options,
+      channelId: _voiceChannelId,
+      currentKey: _voiceKey,
+      currentEpoch: _voiceKeyEpoch,
+      previousKey: _prevVoiceKey,
+      previousEpoch: _prevVoiceKeyEpoch,
+    });
+    if (!decrypted) {
+      return;
+    }
     frame.data = decrypted.buffer;
     controller.enqueue(frame);
   } catch {
-    if (key === _voiceKey && _prevVoiceKey && frameEpoch !== _voiceKeyEpoch) {
-      try {
-        const prevAad = new TextEncoder().encode(`${_voiceChannelId}:${_prevVoiceKeyEpoch}`);
-        const plaintext = aes256GcmDecrypt(_prevVoiceKey, ciphertext, nonce, prevAad);
-        const decrypted = new Uint8Array(header.length + plaintext.length);
-        decrypted.set(header, 0);
-        decrypted.set(plaintext, header.length);
-        frame.data = decrypted.buffer;
-        controller.enqueue(frame);
-        return;
-      } catch {}
-    }
   }
 }
 
 export function isInsertableStreamsSupported() {
-  return typeof RTCRtpScriptTransform !== 'undefined' ||
-    (typeof RTCRtpSender !== 'undefined' && 'createEncodedStreams' in RTCRtpSender.prototype);
+  return isSenderInsertableStreamsSupported() && isReceiverInsertableStreamsSupported();
 }
 
-export function attachSenderEncryption(sender) {
-  if (!sender) return;
-  if ('createEncodedStreams' in sender) {
+export function isSenderInsertableStreamsSupported() {
+  return typeof globalThis.RTCRtpSender === 'function'
+    && typeof globalThis.RTCRtpSender.prototype?.createEncodedStreams === 'function';
+}
+
+export function isReceiverInsertableStreamsSupported() {
+  return typeof globalThis.RTCRtpReceiver === 'function'
+    && typeof globalThis.RTCRtpReceiver.prototype?.createEncodedStreams === 'function';
+}
+
+export function attachSenderEncryption(sender, options = {}) {
+  if (!sender) return false;
+  if (typeof sender.createEncodedStreams !== 'function') {
+    console.warn('[Voice] Sender encryption unavailable for this transport; bypassing transform attach.');
+    return false;
+  }
+
+  try {
     const { readable, writable } = sender.createEncodedStreams();
-    const transform = new TransformStream({ transform: encryptFrame });
+    const transform = new TransformStream({
+      transform(frame, controller) {
+        encryptFrame(frame, controller, options);
+      },
+    });
     readable.pipeThrough(transform).pipeTo(writable);
+    return true;
+  } catch (error) {
+    console.warn('[Voice] Sender encryption unavailable for this transport; bypassing transform attach.', error);
+    return false;
   }
 }
 
-export function attachReceiverDecryption(receiver) {
-  if (!receiver) return;
-  if ('createEncodedStreams' in receiver) {
+export function attachReceiverDecryption(receiver, options = {}) {
+  if (!receiver) return false;
+  if (typeof receiver.createEncodedStreams !== 'function') {
+    console.warn('[Voice] Receiver decryption unavailable for this transport; bypassing transform attach.');
+    return false;
+  }
+
+  try {
     const { readable, writable } = receiver.createEncodedStreams();
-    const transform = new TransformStream({ transform: decryptFrame });
+    const transform = new TransformStream({
+      transform(frame, controller) {
+        decryptFrame(frame, controller, options);
+      },
+    });
     readable.pipeThrough(transform).pipeTo(writable);
+    return true;
+  } catch (error) {
+    console.warn('[Voice] Receiver decryption unavailable for this transport; bypassing transform attach.', error);
+    return false;
   }
 }
 
 export async function distributeVoiceKey(channelId, participantUserIds, key, epoch, socket) {
   _voiceChannelId = channelId;
-  const myUserId = getCurrentUserId();
-  const failures = [];
-
-  for (const participantId of participantUserIds) {
-    if (participantId === myUserId) continue;
-
-    try {
-      const payload = JSON.stringify({
-        type: 'voice_key_distribution',
-        channelId,
-        key: toBase64(key),
-        epoch,
-      });
-
-      const envelope = await encryptDirectMessage(participantId, payload);
-      await emitVoiceKeyEnvelope(socket, participantId, envelope);
-    } catch (err) {
-      console.error(`Failed to distribute voice key to ${participantId}:`, err);
-      failures.push(participantId);
-    }
-  }
-
-  if (failures.length > 0) {
-    throw new Error(`Failed to distribute the secure voice key to ${failures.join(', ')}`);
-  }
+  await distributeVoiceKeyRuntime({
+    channelId,
+    participantUserIds,
+    key,
+    epoch,
+    socket,
+    myUserId: getCurrentUserId(),
+    toBase64Fn: toBase64,
+    encryptDirectMessageFn: encryptDirectMessage,
+  });
 }
 
 export async function processDecryptedVoiceKey(fromUserId, payload) {
-  if (payload.type !== 'voice_key_distribution') return false;
-
-  if (!_voiceChannelId) {
-    const err = new Error('Voice key received before the local channel was ready.');
-    err.retryable = true;
-    throw err;
-  }
-  if (payload.channelId !== _voiceChannelId) {
-    return false;
-  }
-  if (!_voiceChannelParticipants.has(fromUserId)) {
-    const err = new Error('Voice key received before the participant list was ready.');
-    err.retryable = true;
-    throw err;
-  }
-
-  return setVoiceKey(payload.key, payload.epoch);
+  return processDecryptedVoiceKeyRuntime({
+    fromUserId,
+    payload,
+    channelId: _voiceChannelId,
+    participantUserIds: _voiceChannelParticipants,
+    setVoiceKeyFn: setVoiceKey,
+  });
 }

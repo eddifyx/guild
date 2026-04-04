@@ -1,18 +1,13 @@
-import { createContext, useContext, useMemo } from 'react';
+import React, { createContext, useContext, useMemo } from 'react';
 import { useAuth } from './AuthContext';
+import { deriveSecurityState } from '../features/auth/secureStartupState.mjs';
 
 const SecurityContext = createContext(null);
 
 export function SecurityProvider({ children }) {
   const { user, cryptoStatus, cryptoError, retryCryptoInitialization } = useAuth();
 
-  const securityState = !user
-    ? 'signed_out'
-    : cryptoStatus === 'ready'
-      ? 'crypto_ready'
-      : cryptoStatus === 'blocked'
-        ? 'blocked'
-        : 'booting';
+  const securityState = deriveSecurityState({ user, cryptoStatus });
 
   const value = useMemo(() => ({
     securityState,

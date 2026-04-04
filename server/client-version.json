@@ -1,47 +1,52 @@
 {
-  "version": "1.0.41",
-  "releasedAt": "2026-03-16",
+  "version": "1.0.72",
+  "releasedAt": "2026-04-03",
   "patchNotes": {
-    "headline": "HTTPS, smoother voice, and sharper screen sharing",
-    "summary": "v1.0.41 hardens transport security, removes duplicate-name suffixing, fixes room key recovery, upgrades voice and screen sharing quality, and now bridges older Mac installs forward from the legacy HTTP server onto the HTTPS production host after restart.",
+    "headline": "Mac recovery hardening",
+    "summary": "v1.0.72 restores the qualified Mac voice lane while hardening guild creation, /guildchat stability, notifications, and session recovery on the production client bundle.",
     "sections": [
       {
-        "title": "Transport and identity",
+        "title": "Recovery",
         "items": [
-          "Server deployments can now run over HTTPS with native TLS support and optional HTTP-to-HTTPS redirect handling.",
-          "Older Mac installs can now download this release from the legacy HTTP production server and are automatically switched to the HTTPS production host after restart.",
-          "Profile names are no longer forced to be unique. Your npub stays the real identity, so multiple people can choose the same display name."
+          "Mac voice, mic test, and relaunch behavior are recovered on the currently qualified media path instead of the previously broken local state.",
+          "Guild creation and /guildchat onboarding no longer crash the renderer when guild state mounts after the shell is already visible.",
+          "Fully quit and relaunch /guild after updating so the refreshed voice and runtime recovery paths start cleanly."
         ]
       },
       {
-        "title": "Security and reliability",
+        "title": "Stability",
         "items": [
-          "Private-key and signer sessions are now session-only and are no longer stored in the OS keychain.",
-          "Room key recovery is more resilient, which fixes the Windows \"message could not be decrypted\" issue when opening General chat.",
-          "Secure startup now clears stale session-only auth on restart instead of trapping you behind a blocked crypto screen."
-        ]
-      },
-      {
-        "title": "Voice and streaming",
-        "items": [
-          "Voice channel responsiveness tuning from this pass is now the gold standard baseline for Mac performance.",
-          "Mic test playback is more reliable when output devices change or a saved sink disappears.",
-          "Screen sharing now targets 1080p at 30fps with higher bitrate headroom, better text and detail encoding hints, and improved mediasoup outgoing bitrate defaults.",
-          "Windows stays pinned to v1.0.40 until a real Windows-native build is published."
+          "DM notifications, hidden-app OS notifications, universal /guildchat access, and session restore stay on the qualified stabilization bundle.",
+          "Fresh QR signer sessions continue to work, while longer-idle QR reconnect remains a lower-priority follow-up lane outside this Mac recovery push."
         ]
       }
     ]
   },
   "platformOverrides": {
-    "win32": {
-      "version": "1.0.40",
-      "releasedAt": null,
-      "patchNotes": null
-    },
     "win32-x64": {
-      "version": "1.0.40",
-      "releasedAt": null,
-      "patchNotes": null
+      "version": "1.0.71",
+      "releasedAt": "2026-03-24",
+      "patchNotes": {
+        "headline": "Windows startup recovery",
+        "summary": "v1.0.71 fixes the Windows startup packaging gap from 1.0.70 while keeping the same refreshed /guildchat, notifications, and current working voice lane.",
+        "sections": [
+          {
+            "title": "Windows",
+            "items": [
+              "The missing packaged runtime config files are restored so the Windows main process can boot again after update.",
+              "This keeps the refreshed /guildchat mentions, DM notifications, OS notifications, and universal /guildchat access from the stabilization pass.",
+              "Fully quit and relaunch /guild after updating so the corrected Windows bundle starts cleanly."
+            ]
+          },
+          {
+            "title": "Stability",
+            "items": [
+              "Voice stays on the same working production media path rather than introducing a new media stack change.",
+              "This Windows recovery release is packaging-focused and does not change the live server-side guild chat rules."
+            ]
+          }
+        ]
+      }
     }
   }
 }

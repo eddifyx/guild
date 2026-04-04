@@ -1,0 +1,33 @@
+export function buildUseVoiceHookControllerRuntimeValue({
+  joinChannel,
+  leaveChannel,
+  toggleMute,
+  toggleDeafen,
+  setOutputDevice,
+  setUserVolume,
+  setMicGain,
+  setVoiceProcessingMode,
+  toggleNoiseSuppression,
+  startScreenShare,
+  stopScreenShare,
+  confirmScreenShare,
+  cancelSourcePicker,
+  clearScreenShareError,
+} = {}) {
+  return {
+    joinChannel,
+    leaveChannel,
+    toggleMute,
+    toggleDeafen,
+    setOutputDevice,
+    setUserVolume,
+    setMicGain,
+    setVoiceProcessingMode,
+    toggleNoiseSuppression,
+    startScreenShare,
+    stopScreenShare,
+    confirmScreenShare,
+    cancelSourcePicker,
+    clearScreenShareError,
+  };
+}

@@ -5,8 +5,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getPlatformTarget: () => (process.platform === 'darwin'
     ? `darwin-${process.arch}`
     : `${process.platform}-${process.arch}`),
-  showNotification: (title, body) =>
-    ipcRenderer.invoke('show-notification', { title, body }),
+  getAppFlavor: () => ipcRenderer.sendSync('get-app-flavor-sync'),
+  isHardwareAccelerationEnabled: () => ipcRenderer.sendSync('get-hardware-acceleration-enabled-sync'),
+  getGPUFeatureStatus: () => ipcRenderer.sendSync('get-gpu-feature-status-sync'),
   getAppVersion: () =>
     ipcRenderer.invoke('get-app-version'),
   isAppleVoiceCaptureSupported: () => ipcRenderer.invoke('apple-voice-capture-supported'),
@@ -34,6 +35,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('update-progress', handler);
     return () => ipcRenderer.removeListener('update-progress', handler);
   },
+  showSystemNotification: (payload) => ipcRenderer.invoke('system-notification:show', payload),
+  onSystemNotificationAction: (callback) => {
+    const handler = (_event, payload) => callback(payload);
+    ipcRenderer.on('system-notification:action', handler);
+    return () => ipcRenderer.removeListener('system-notification:action', handler);
+  },
   prefetchDesktopSources: () => ipcRenderer.invoke('prefetch-desktop-sources'),
   getDesktopSources: () => ipcRenderer.invoke('get-desktop-sources'),
   getDesktopWindows: () => ipcRenderer.invoke('get-desktop-windows'),
@@ -42,32 +49,81 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getScreenCaptureAccessStatus: () => ipcRenderer.invoke('get-screen-capture-access-status'),
   openScreenCaptureSettings: () => ipcRenderer.invoke('open-screen-capture-settings'),
   openExternal: (url) => ipcRenderer.invoke('open-external', url),
+  authStateGetSync: () => ipcRenderer.sendSync('auth-state:get-sync'),
+  authStateSet: (authData) => ipcRenderer.invoke('auth-state:set', authData),
+  authStateClear: () => ipcRenderer.invoke('auth-state:clear'),
+  signerStateGet: () => ipcRenderer.invoke('signer-state:get'),
+  signerStateSet: (signerState) => ipcRenderer.invoke('signer-state:set', signerState),
+  signerStateClear: () => ipcRenderer.invoke('signer-state:clear'),
   messageCacheGet: (userId, messageId) => ipcRenderer.invoke('message-cache:get', userId, messageId),
+  messageCacheGetMany: (userId, messageIds) => ipcRenderer.invoke('message-cache:get-many', userId, messageIds),
   messageCacheSet: (userId, messageId, entry) => ipcRenderer.invoke('message-cache:set', userId, messageId, entry),
   messageCacheDelete: (userId, messageId) => ipcRenderer.invoke('message-cache:delete', userId, messageId),
   logPerfSample: (sample) => ipcRenderer.send('perf:sample', sample),
   getPerfSamples: () => ipcRenderer.invoke('perf:get-samples'),
+  debugLog: (scope, details) => ipcRenderer.invoke('debug-log', scope, details),
+  getDebugLogTail: (scope, limit) => ipcRenderer.invoke('debug-log:get-tail', scope, limit),
 });
 
 // Expose libsignal crypto operations (all key material stays in main process).
 contextBridge.exposeInMainWorld('signalCrypto', {
   initialize: (userId) => ipcRenderer.invoke('signal:initialize', userId),
   destroy: () => ipcRenderer.invoke('signal:destroy'),
+  resetLocalState: (userId = null) => ipcRenderer.invoke('signal:reset-local-state', userId),
+  getDeviceId: () => ipcRenderer.invoke('signal:get-device-id'),
+  setDeviceId: (deviceId) => ipcRenderer.invoke('signal:set-device-id', deviceId),
+  allocateDeviceId: (excludedDeviceIds = []) => ipcRenderer.invoke('signal:allocate-device-id', excludedDeviceIds),
   getBundle: () => ipcRenderer.invoke('signal:get-bundle'),
-  processBundle: (recipientId, bundle) =>
-    ipcRenderer.invoke('signal:process-bundle', recipientId, bundle),
-  getIdentityState: (recipientId, identityKey = null) =>
-    ipcRenderer.invoke('signal:get-identity-state', recipientId, identityKey),
-  approveIdentity: (recipientId, identityKey, options) =>
-    ipcRenderer.invoke('signal:approve-identity', recipientId, identityKey, options),
-  markIdentityVerified: (recipientId, identityKey) =>
-    ipcRenderer.invoke('signal:mark-identity-verified', recipientId, identityKey),
-  encrypt: (recipientId, plaintext) =>
-    ipcRenderer.invoke('signal:encrypt', recipientId, plaintext),
-  decrypt: (senderId, type, payload) =>
-    ipcRenderer.invoke('signal:decrypt', senderId, type, payload),
-  hasSession: (userId) => ipcRenderer.invoke('signal:has-session', userId),
-  deleteSession: (userId) => ipcRenderer.invoke('signal:delete-session', userId),
+  processBundle: (recipientId, recipientDeviceIdOrBundle, maybeBundle) => {
+    const hasExplicitDeviceId = typeof recipientDeviceIdOrBundle === 'number';
+    return ipcRenderer.invoke(
+      'signal:process-bundle',
+      recipientId,
+      hasExplicitDeviceId ? recipientDeviceIdOrBundle : 1,
+      hasExplicitDeviceId ? maybeBundle : recipientDeviceIdOrBundle,
+    );
+  },
+  getIdentityState: (recipientId, recipientDeviceIdOrIdentityKey = 1, maybeIdentityKey = null) =>
+    ipcRenderer.invoke(
+      'signal:get-identity-state',
+      recipientId,
+      typeof recipientDeviceIdOrIdentityKey === 'number' ? recipientDeviceIdOrIdentityKey : 1,
+      typeof recipientDeviceIdOrIdentityKey === 'number' ? maybeIdentityKey : recipientDeviceIdOrIdentityKey,
+    ),
+  approveIdentity: (recipientId, recipientDeviceIdOrIdentityKey = 1, maybeIdentityKey, maybeOptions) =>
+    ipcRenderer.invoke(
+      'signal:approve-identity',
+      recipientId,
+      typeof recipientDeviceIdOrIdentityKey === 'number' ? recipientDeviceIdOrIdentityKey : 1,
+      typeof recipientDeviceIdOrIdentityKey === 'number' ? maybeIdentityKey : recipientDeviceIdOrIdentityKey,
+      typeof recipientDeviceIdOrIdentityKey === 'number' ? maybeOptions : maybeIdentityKey,
+    ),
+  markIdentityVerified: (recipientId, recipientDeviceIdOrIdentityKey = 1, maybeIdentityKey) =>
+    ipcRenderer.invoke(
+      'signal:mark-identity-verified',
+      recipientId,
+      typeof recipientDeviceIdOrIdentityKey === 'number' ? recipientDeviceIdOrIdentityKey : 1,
+      typeof recipientDeviceIdOrIdentityKey === 'number' ? maybeIdentityKey : recipientDeviceIdOrIdentityKey,
+    ),
+  encrypt: (recipientId, recipientDeviceIdOrPlaintext, maybePlaintext) =>
+    ipcRenderer.invoke(
+      'signal:encrypt',
+      recipientId,
+      typeof recipientDeviceIdOrPlaintext === 'number' ? recipientDeviceIdOrPlaintext : 1,
+      typeof recipientDeviceIdOrPlaintext === 'number' ? maybePlaintext : recipientDeviceIdOrPlaintext,
+    ),
+  decrypt: (senderId, senderDeviceIdOrType, maybeType, maybePayload) =>
+    ipcRenderer.invoke(
+      'signal:decrypt',
+      senderId,
+      typeof senderDeviceIdOrType === 'number' ? senderDeviceIdOrType : 1,
+      typeof senderDeviceIdOrType === 'number' ? maybeType : senderDeviceIdOrType,
+      typeof senderDeviceIdOrType === 'number' ? maybePayload : maybeType,
+    ),
+  hasSession: (userId, recipientDeviceId = 1) =>
+    ipcRenderer.invoke('signal:has-session', userId, typeof recipientDeviceId === 'number' ? recipientDeviceId : 1),
+  deleteSession: (userId, recipientDeviceId = 1) =>
+    ipcRenderer.invoke('signal:delete-session', userId, typeof recipientDeviceId === 'number' ? recipientDeviceId : 1),
   createSKDM: (roomId) => ipcRenderer.invoke('signal:create-skdm', roomId),
   processSKDM: (senderId, skdm) =>
     ipcRenderer.invoke('signal:process-skdm', senderId, skdm),

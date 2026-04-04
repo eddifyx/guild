@@ -148,6 +148,7 @@ Remote install step would:
 - install server dependencies
 - copy the env template if $REMOTE_ENV_FILE does not exist
 - install $SERVICE_NAME.service
+- reassert mediasoup firewall ports if ufw is active
 EOF
   exit 0
 fi
@@ -177,6 +178,18 @@ sudo cp '$REMOTE_SERVICE_TEMPLATE' '$REMOTE_SERVICE_FILE'
 sudo systemctl daemon-reload
 sudo -u guild npm --prefix '$REMOTE_APP_DIR/server' install --omit=dev
 sudo -u guild node '$REMOTE_APP_DIR/server/scripts/ensureBetterSqlite3.js'
+
+if command -v ufw >/dev/null 2>&1; then
+  UFW_STATUS=\$(sudo ufw status || true)
+  if grep -q "Status: active" <<<"\$UFW_STATUS"; then
+    if ! grep -q "10000:10200/udp" <<<"\$UFW_STATUS"; then
+      sudo ufw allow 10000:10200/udp
+    fi
+    if ! grep -q "10000:10200/tcp" <<<"\$UFW_STATUS"; then
+      sudo ufw allow 10000:10200/tcp
+    fi
+  fi
+fi
 
 if [[ "$START_SERVICE" -eq 1 ]]; then
   sudo systemctl enable '$SERVICE_NAME'

@@ -1,0 +1,48 @@
+{
+  "releaseVersion": "1.0.72",
+  "releaseType": "recovery",
+  "baselineVersion": "1.0.71",
+  "workspacePath": "/Users/eddifyx/Documents/Projects/guild-main",
+  "generatedAt": "2026-04-03T22:01:07Z",
+  "clientFilesChanged": [
+    "/Users/eddifyx/Documents/Projects/guild-main/client/electron/electronWindowContentRuntime.js",
+    "/Users/eddifyx/Documents/Projects/guild-main/client/forge.config.js"
+  ],
+  "serverFilesChanged": [
+    "/Users/eddifyx/Documents/Projects/guild-main/server/client-version.json"
+  ],
+  "approvedBy": "eddifyx",
+  "shipDecision": "pending",
+  "notes": "The exact Windows 1.0.72 artifact was built on a real Windows machine, passed the packaged-runtime, lane-marker, and windows-update-zip validators, and reached the normal production client UI on the Windows desktop. The previous Windows recovery artifact 1.0.71 was staged against the local server and successfully downloaded and applied the 1.0.72 updater payload. Windows voice has not been manually qualified on the target machine for this release, so this proof remains pending under the gold-standard release gate.",
+  "artifacts": [
+    {
+      "platform": "win32-x64",
+      "version": "1.0.72",
+      "path": "/Users/eddifyx/Documents/Projects/guild-main/client/out/manual-release-1.0.72/guild-win32-x64-1.0.72.zip",
+      "sha256": "06ae1be03b6069912753a8c33e98ce6d760873ab476f136c11a0beb5582f3889",
+      "validators": {
+        "packagedRuntime": "passed",
+        "laneMarkers": "passed",
+        "windowsUpdateZip": "passed"
+      },
+      "startupProof": {
+        "status": "passed",
+        "tester": "eddifyx",
+        "environment": "Windows desktop (remote interactive session)",
+        "method": "Fresh extract and launch of guild.exe from the exact 1.0.72 published zip on the Windows machine.",
+        "notes": "The packaged Windows app reached the normal production client UI on the desktop machine. The SSH launch path itself was unreliable for visibility, but direct desktop launch of the exact artifact succeeded."
+      },
+      "smokeChecklist": {
+        "freshLogin": "pending",
+        "restoredSession": "pending",
+        "guildchatPost": "pending",
+        "guildchatMention": "pending",
+        "dmNotifications": "pending",
+        "osNotifications": "pending",
+        "voice": "pending",
+        "updatePath": "passed"
+      }
+    }
+  ],
+  "recoveryReason": "Windows 1.0.72 restores the qualified packaged startup and updater path while leaving Windows voice still unqualified for this release decision."
+}

@@ -1,6 +1,10 @@
 import { useState, useEffect, useCallback } from 'react';
 import { api } from '../api';
 import { useSocket } from '../contexts/SocketContext';
+import {
+  BOARDS_DISABLED,
+  createBoardsDisabledError,
+} from '../features/messaging/boardAvailability.mjs';
 
 export function useRooms(guildId) {
   const { socket } = useSocket();
@@ -8,6 +12,12 @@ export function useRooms(guildId) {
   const [myRooms, setMyRooms] = useState([]);
 
   const fetchRooms = useCallback(async () => {
+    if (BOARDS_DISABLED) {
+      setRooms([]);
+      setMyRooms([]);
+      return [];
+    }
+
     try {
       const query = guildId ? `?guildId=${guildId}` : '';
       const [all, mine] = await Promise.all([
@@ -23,11 +33,16 @@ export function useRooms(guildId) {
   }, [guildId]);
 
   useEffect(() => {
+    if (BOARDS_DISABLED) {
+      setRooms([]);
+      setMyRooms([]);
+      return;
+    }
     fetchRooms();
   }, [fetchRooms]);
 
   useEffect(() => {
-    if (!socket) return;
+    if (BOARDS_DISABLED || !socket) return;
 
     const onCreated = (room) => {
       // Only add rooms belonging to the current guild
@@ -63,6 +78,9 @@ export function useRooms(guildId) {
   }, [socket, guildId]);
 
   const createRoom = useCallback(async (name) => {
+    if (BOARDS_DISABLED) {
+      throw createBoardsDisabledError();
+    }
     const room = await api('/api/rooms', {
       method: 'POST',
       body: JSON.stringify({ name, guildId }),
@@ -74,18 +92,27 @@ export function useRooms(guildId) {
   }, [socket, guildId]);
 
   const joinRoom = useCallback(async (roomId) => {
+    if (BOARDS_DISABLED) {
+      throw createBoardsDisabledError();
+    }
     await api(`/api/rooms/${roomId}/join`, { method: 'POST' });
     if (socket) socket.emit('room:join', { roomId });
     await fetchRooms();
   }, [socket, fetchRooms]);
 
   const leaveRoom = useCallback(async (roomId) => {
+    if (BOARDS_DISABLED) {
+      throw createBoardsDisabledError();
+    }
     await api(`/api/rooms/${roomId}/leave`, { method: 'POST' });
     if (socket) socket.emit('room:leave', { roomId });
     setMyRooms(prev => prev.filter(r => r.id !== roomId));
   }, [socket]);
 
   const renameRoom = useCallback(async (roomId, name) => {
+    if (BOARDS_DISABLED) {
+      throw createBoardsDisabledError();
+    }
     await api(`/api/rooms/${roomId}`, {
       method: 'PUT',
       body: JSON.stringify({ name }),
@@ -93,8 +120,20 @@ export function useRooms(guildId) {
   }, []);
 
   const deleteRoom = useCallback(async (roomId) => {
+    if (BOARDS_DISABLED) {
+      throw createBoardsDisabledError();
+    }
     await api(`/api/rooms/${roomId}`, { method: 'DELETE' });
   }, []);
 
-  return { rooms, myRooms, createRoom, joinRoom, leaveRoom, renameRoom, deleteRoom, refreshRooms: fetchRooms };
+  return {
+    rooms: BOARDS_DISABLED ? [] : rooms,
+    myRooms: BOARDS_DISABLED ? [] : myRooms,
+    createRoom,
+    joinRoom,
+    leaveRoom,
+    renameRoom,
+    deleteRoom,
+    refreshRooms: fetchRooms,
+  };
 }

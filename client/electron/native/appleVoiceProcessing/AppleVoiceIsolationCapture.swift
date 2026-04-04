@@ -41,8 +41,9 @@ final class VoiceIsolationCapture {
   private let sampleRate: Double = 48_000
   private let channels: UInt32 = 1
   private let frameSamples: UInt32 = 480
+  private let minimumOtherAudioDuckingLevel = AUVoiceIOOtherAudioDuckingLevel(rawValue: 10)!
   private var pendingBuffer = Data()
-  private var activeConfigurationId = "full-duplex"
+  private var activeConfigurationId = "capture-only"
 
   func run() throws {
     switch AVCaptureDevice.authorizationStatus(for: .audio) {
@@ -72,6 +73,8 @@ final class VoiceIsolationCapture {
       "voiceProcessingEnabled": true,
       "agcEnabled": true,
       "bypassVoiceProcessing": false,
+      "advancedOtherAudioDucking": false,
+      "otherAudioDuckingLevel": Int(minimumOtherAudioDuckingLevel.rawValue),
       "configuration": activeConfigurationId,
     ])
 
@@ -94,8 +97,8 @@ final class VoiceIsolationCapture {
 
   private func setupAudioUnit() throws {
     let configurations = [
-      AudioUnitConfiguration(id: "full-duplex", enableOutputBus: true),
       AudioUnitConfiguration(id: "capture-only", enableOutputBus: false),
+      AudioUnitConfiguration(id: "full-duplex", enableOutputBus: true),
     ]
 
     var lastError: Error?
@@ -181,6 +184,20 @@ final class VoiceIsolationCapture {
       value: &enableAgc,
       valueSize: UInt32(MemoryLayout<UInt32>.size),
       label: "voice processing AGC"
+    )
+
+    var duckingConfiguration = AUVoiceIOOtherAudioDuckingConfiguration(
+      mEnableAdvancedDucking: false,
+      mDuckingLevel: minimumOtherAudioDuckingLevel
+    )
+    try setProperty(
+      unit,
+      id: kAUVoiceIOProperty_OtherAudioDuckingConfiguration,
+      scope: kAudioUnitScope_Global,
+      element: 0,
+      value: &duckingConfiguration,
+      valueSize: UInt32(MemoryLayout<AUVoiceIOOtherAudioDuckingConfiguration>.size),
+      label: "other audio ducking"
     )
 
     var streamFormat = AudioStreamBasicDescription(

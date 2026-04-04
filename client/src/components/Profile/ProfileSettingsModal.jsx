@@ -1,8 +1,26 @@
-import { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
+import { nip19 } from 'nostr-tools';
+
 import { fetchCurrentProfile, publishProfile, uploadImage } from '../../nostr/profilePublisher';
 import { useAuth } from '../../contexts/AuthContext';
-import { nip19 } from 'nostr-tools';
-import Avatar from '../Common/Avatar';
+import {
+  ProfileSettingsForm,
+  ProfileSettingsHeader,
+  ProfileSettingsIntro,
+  ProfileSettingsLoadingState,
+  ProfileSettingsStatusMessage,
+} from './ProfileSettingsModalPanels.jsx';
+import { styles } from './ProfileSettingsModalStyles.mjs';
+
+const PROFILE_SYNC_TIMEOUT_MS = 10000;
+
+function withTimeout(promise, timeoutMs, message) {
+  let timeoutId;
+  const timeoutPromise = new Promise((_, reject) => {
+    timeoutId = setTimeout(() => reject(new Error(message)), timeoutMs);
+  });
+  return Promise.race([promise, timeoutPromise]).finally(() => clearTimeout(timeoutId));
+}
 
 export default function ProfileSettingsModal({ onClose, onSaved }) {
   const { user, syncNostrProfile } = useAuth();
@@ -18,31 +36,44 @@ export default function ProfileSettingsModal({ onClose, onSaved }) {
   const [success, setSuccess] = useState('');
   const fileRef = useRef();
 
-  // Fetch existing profile on mount
   useEffect(() => {
     let fallbackPk = null;
-    try { if (user?.npub) fallbackPk = nip19.decode(user.npub).data; } catch {}
-    fetchCurrentProfile(fallbackPk).then(profile => {
-      if (profile) {
+    try {
+      if (user?.npub) {
+        fallbackPk = nip19.decode(user.npub).data;
+      }
+    } catch {}
+
+    fetchCurrentProfile(fallbackPk)
+      .then((profile) => {
+        if (!profile) {
+          return;
+        }
         setName(profile.name || '');
         setAbout(profile.about || '');
         setPicture(profile.picture || '');
         setBanner(profile.banner || '');
         setLud16(profile.lud16 || '');
-      }
-    }).catch(() => {}).finally(() => setLoading(false));
+      })
+      .catch(() => {})
+      .finally(() => setLoading(false));
   }, []);
 
-  // Escape to close
   useEffect(() => {
-    const handler = (e) => { if (e.key === 'Escape') onClose(); };
+    const handler = (event) => {
+      if (event.key === 'Escape') {
+        onClose();
+      }
+    };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
   }, [onClose]);
 
-  const handleImageUpload = async (e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+  const handleImageUpload = async (event) => {
+    const file = event.target.files?.[0];
+    if (!file) {
+      return;
+    }
     if (file.size > 10 * 1024 * 1024) {
       setError('Image must be under 10MB');
       return;
@@ -53,7 +84,7 @@ export default function ProfileSettingsModal({ onClose, onSaved }) {
       const url = await uploadImage(file);
       setPicture(url);
     } catch (err) {
-      setError('Image upload failed: ' + err.message);
+      setError(`Image upload failed: ${err.message}`);
     } finally {
       setUploading(false);
     }
@@ -76,241 +107,94 @@ export default function ProfileSettingsModal({ onClose, onSaved }) {
     setSaving(true);
     setError('');
     setSuccess('');
-    const result = await publishProfile(nextProfile);
-    if (result.ok) {
-      let syncError = null;
-      let syncedUser = null;
+    try {
+      const result = await publishProfile(nextProfile);
 
-      try {
-        const syncResult = await syncNostrProfile(nextProfile);
-        syncedUser = syncResult?.syncedUser || null;
-      } catch (err) {
-        syncError = err;
+      if (result.ok) {
+        let syncError = null;
+        let syncedUser = null;
+
+        try {
+          const syncResult = await withTimeout(
+            syncNostrProfile(nextProfile),
+            PROFILE_SYNC_TIMEOUT_MS,
+            'Timed out syncing the published profile back into /guild'
+          );
+          syncedUser = syncResult?.syncedUser || null;
+        } catch (err) {
+          syncError = err;
+        }
+
+        const savedProfile = {
+          name: nextProfile.name || syncedUser?.username || user?.username || '',
+          about: nextProfile.about,
+          picture: syncedUser?.profilePicture ?? (nextProfile.picture || null),
+          banner: nextProfile.banner,
+          lud16: syncedUser?.lud16 ?? (nextProfile.lud16 || null),
+        };
+
+        if (onSaved) {
+          onSaved(savedProfile);
+        }
+
+        setSuccess(
+          syncError
+            ? `Profile published to Nostr relays, but /guild sync failed: ${syncError.message}`
+            : 'Profile published to Nostr relays'
+        );
+        setTimeout(() => setSuccess(''), 3000);
+      } else {
+        setError(result.error || 'Publish failed');
       }
-
-      const savedProfile = {
-        name: nextProfile.name || syncedUser?.username || user?.username || '',
-        about: nextProfile.about,
-        picture: syncedUser?.profilePicture ?? (nextProfile.picture || null),
-        banner: nextProfile.banner,
-        lud16: syncedUser?.lud16 ?? (nextProfile.lud16 || null),
-      };
-
-      if (onSaved) {
-        onSaved(savedProfile);
-      }
-
-      setSuccess(
-        syncError
-          ? `Profile published to Nostr relays, but /guild sync failed: ${syncError.message}`
-          : 'Profile published to Nostr relays'
-      );
-      setTimeout(() => setSuccess(''), 3000);
-    } else {
-      setError(result.error || 'Publish failed');
+    } catch (err) {
+      setError(err?.message || 'Publish failed');
+    } finally {
+      setSaving(false);
     }
-    setSaving(false);
   };
 
   return (
     <div onClick={onClose} style={styles.overlay}>
-      <div onClick={e => e.stopPropagation()} style={styles.modal}>
-        <div style={styles.header}>
-          <h2 style={styles.title}>Nostr Profile</h2>
-          <button onClick={onClose} style={styles.closeBtn}>&times;</button>
-        </div>
+      <div onClick={(event) => event.stopPropagation()} style={styles.modal}>
+        <ProfileSettingsHeader onClose={onClose} styles={styles} />
+        <ProfileSettingsIntro styles={styles} />
 
-        <p style={{ fontSize: 12, color: 'var(--text-muted)', margin: '0 0 16px', padding: '0 20px' }}>
-          Your Nostr profile (kind:0) is published to public relays. Changes will be visible in Primal, Damus, and other Nostr clients.
-        </p>
-
-        {error && <div style={styles.error}>{error}</div>}
-        {success && <div style={styles.success}>{success}</div>}
+        {error && (
+          <ProfileSettingsStatusMessage tone="error" styles={styles}>
+            {error}
+          </ProfileSettingsStatusMessage>
+        )}
+        {success && (
+          <ProfileSettingsStatusMessage tone="success" styles={styles}>
+            {success}
+          </ProfileSettingsStatusMessage>
+        )}
 
         {loading ? (
-          <div style={{ padding: 40, textAlign: 'center', color: 'var(--text-muted)', fontSize: 13 }}>
-            Loading profile from relays...
-          </div>
+          <ProfileSettingsLoadingState />
         ) : (
-          <div style={styles.content}>
-            {/* Profile picture */}
-            <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 16 }}>
-              {picture ? (
-                <img src={picture} alt="Profile" style={{ width: 64, height: 64, borderRadius: '50%', objectFit: 'cover', border: '2px solid var(--border)' }} />
-              ) : (
-                <Avatar username={name || user?.username || '?'} color={user?.avatarColor || '#40FF40'} size={64} profilePicture={null} />
-              )}
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                <button
-                  onClick={() => fileRef.current?.click()}
-                  disabled={uploading}
-                  style={styles.secondaryBtnSmall}
-                >
-                  {uploading ? 'Uploading...' : 'Upload Picture'}
-                </button>
-                <input ref={fileRef} type="file" accept="image/*" onChange={handleImageUpload} style={{ display: 'none' }} />
-                {picture && (
-                  <button onClick={() => setPicture('')} style={{ ...styles.secondaryBtnSmall, color: 'var(--text-muted)', fontSize: 11 }}>
-                    Remove
-                  </button>
-                )}
-              </div>
-            </div>
-
-            {/* Fields */}
-            <label style={styles.label}>
-              Display Name
-              <input value={name} onChange={e => setName(e.target.value)} style={styles.input} maxLength={50} placeholder="Your name" />
-            </label>
-
-            <label style={styles.label}>
-              Bio
-              <textarea value={about} onChange={e => setAbout(e.target.value)} style={{ ...styles.input, minHeight: 60, resize: 'vertical' }} maxLength={250} placeholder="About you..." />
-            </label>
-
-            <label style={styles.label}>
-              Picture URL
-              <input value={picture} onChange={e => setPicture(e.target.value)} style={styles.input} placeholder="https://..." />
-            </label>
-
-            <label style={styles.label}>
-              Banner URL
-              <input value={banner} onChange={e => setBanner(e.target.value)} style={styles.input} placeholder="https://..." />
-            </label>
-
-            <label style={styles.label}>
-              Lightning Address (LUD-16)
-              <input value={lud16} onChange={e => setLud16(e.target.value)} style={styles.input} placeholder="you@wallet.com" />
-            </label>
-
-            <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 8 }}>
-              <button onClick={onClose} style={styles.secondaryBtn}>Cancel</button>
-              <button onClick={handlePublish} disabled={saving} style={{ ...styles.primaryBtn, opacity: saving ? 0.5 : 1 }}>
-                {saving ? 'Publishing...' : 'Publish to Nostr'}
-              </button>
-            </div>
-          </div>
+          <ProfileSettingsForm
+            user={user}
+            name={name}
+            setName={setName}
+            about={about}
+            setAbout={setAbout}
+            picture={picture}
+            setPicture={setPicture}
+            banner={banner}
+            setBanner={setBanner}
+            lud16={lud16}
+            setLud16={setLud16}
+            fileRef={fileRef}
+            uploading={uploading}
+            saving={saving}
+            onClose={onClose}
+            onImageUpload={handleImageUpload}
+            onPublish={handlePublish}
+            styles={styles}
+          />
         )}
       </div>
     </div>
   );
 }
-
-const styles = {
-  overlay: {
-    position: 'fixed',
-    inset: 0,
-    background: 'rgba(0, 0, 0, 0.7)',
-    backdropFilter: 'blur(4px)',
-    WebkitBackdropFilter: 'blur(4px)',
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    zIndex: 1000,
-  },
-  modal: {
-    background: 'var(--bg-secondary)',
-    borderRadius: 12,
-    border: '1px solid var(--border)',
-    boxShadow: '0 16px 48px rgba(0, 0, 0, 0.5)',
-    width: 440,
-    maxWidth: '90vw',
-    maxHeight: '80vh',
-    display: 'flex',
-    flexDirection: 'column',
-    animation: 'fadeIn 0.2s ease-out',
-  },
-  header: {
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    padding: '16px 20px 8px',
-  },
-  title: {
-    fontSize: 16,
-    fontWeight: 600,
-    color: 'var(--text-primary)',
-    margin: 0,
-  },
-  closeBtn: {
-    background: 'none',
-    border: 'none',
-    color: 'var(--text-muted)',
-    fontSize: 22,
-    cursor: 'pointer',
-    padding: '0 4px',
-    lineHeight: 1,
-  },
-  content: {
-    flex: 1,
-    overflowY: 'auto',
-    padding: '0 20px 20px',
-    display: 'flex',
-    flexDirection: 'column',
-    gap: 12,
-  },
-  label: {
-    display: 'flex',
-    flexDirection: 'column',
-    gap: 4,
-    fontSize: 12,
-    fontWeight: 500,
-    color: 'var(--text-muted)',
-  },
-  input: {
-    padding: '8px 12px',
-    borderRadius: 6,
-    border: '1px solid var(--border)',
-    background: 'var(--bg-input)',
-    color: 'var(--text-primary)',
-    fontSize: 13,
-    outline: 'none',
-    transition: 'border-color 0.2s',
-  },
-  primaryBtn: {
-    padding: '10px 16px',
-    borderRadius: 6,
-    border: 'none',
-    background: 'var(--accent)',
-    color: '#fff',
-    fontSize: 13,
-    fontWeight: 600,
-    cursor: 'pointer',
-  },
-  secondaryBtn: {
-    padding: '10px 16px',
-    borderRadius: 6,
-    border: '1px solid var(--border)',
-    background: 'transparent',
-    color: 'var(--text-secondary)',
-    fontSize: 13,
-    cursor: 'pointer',
-  },
-  secondaryBtnSmall: {
-    padding: '6px 12px',
-    borderRadius: 6,
-    border: '1px solid var(--border)',
-    background: 'transparent',
-    color: 'var(--text-secondary)',
-    fontSize: 12,
-    cursor: 'pointer',
-  },
-  error: {
-    margin: '0 20px 8px',
-    padding: '8px 12px',
-    borderRadius: 6,
-    background: 'rgba(239, 68, 68, 0.1)',
-    border: '1px solid var(--danger)',
-    color: 'var(--danger)',
-    fontSize: 12,
-  },
-  success: {
-    margin: '0 20px 8px',
-    padding: '8px 12px',
-    borderRadius: 6,
-    background: 'rgba(0, 214, 143, 0.1)',
-    border: '1px solid var(--success)',
-    color: 'var(--success)',
-    fontSize: 12,
-  },
-};

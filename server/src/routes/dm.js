@@ -1,11 +1,17 @@
 const express = require('express');
 const auth = require('../middleware/authMiddleware');
-const { getDMConversations } = require('../db');
+const { listRawDMConversations, usersShareGuild } = require('../db');
+const { filterVisibleDirectMessageConversations } = require('../domain/messaging/directMessages');
 
 const router = express.Router();
 
 router.get('/conversations', auth, (req, res) => {
-  const conversations = getDMConversations(req.userId);
+  const conversations = filterVisibleDirectMessageConversations(
+    listRawDMConversations(req.userId),
+    {
+      canUseDirectMessagesWithUser: (otherUserId) => usersShareGuild.get(req.userId, otherUserId),
+    }
+  );
   res.json(conversations);
 });
 

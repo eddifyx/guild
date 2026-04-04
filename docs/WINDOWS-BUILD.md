@@ -1,209 +1,154 @@
-# Windows Build Runbook
+# Windows Build And Release Runbook
 
-This is the fastest path to build a real Windows desktop artifact for `/guild`
-on a Windows machine instead of cross-building from macOS.
+Use this for any Windows build that might reach users.
 
-Current status:
+## Hard Rule
 
-- Windows packaging is `zip` only
-- there is no Windows installer `.exe` yet
-- the app executable lives inside the extracted app folder as `guild.exe`
+Windows production releases must be built or at least launch-tested on a real
+Windows machine.
 
-If you see `Cannot find module 'better-sqlite3'`, you are almost certainly
-launching an older broken zip. Build a fresh artifact with the steps below and
-extract it into a brand new folder before testing.
+If a non-Windows machine is used for emergency recovery packaging, that artifact
+is not eligible for production until the exact published zip boots on Windows.
 
-## 1. Prerequisites
+## Current Packaging Shape
 
-Install these on the Windows machine first:
+- Windows release format is `guild-win32-x64-<version>.zip`
+- the executable is `guild.exe`
+- there is no signed installer yet
+
+## 1. Prerequisites On Windows
 
 - `Git`
 - `Node.js 22 LTS`
 - `Python 3`
 - `Visual Studio 2022 Build Tools`
+- `Desktop development with C++` workload
 
-For Visual Studio Build Tools, make sure this workload is installed:
-
-- `Desktop development with C++`
-
-That gives native Electron modules like `better-sqlite3` a real Windows build
-environment.
-
-## 2. Get The Repo
-
-Clone the repo somewhere simple, for example:
-
-```powershell
-git clone <YOUR_REPO_URL> R:\Projects\guild-main
-cd R:\Projects\guild-main
-```
-
-If you already have the repo on the Windows box, pull the latest changes first.
-
-## 3. Install Dependencies
+## 2. Prepare A Clean Workspace
 
 From the repo root:
 
 ```powershell
+git pull
 npm install
-```
-
-This project uses npm workspaces, so install from the root, not from `client/`
-first.
-
-## 4. Clean Old Windows Artifacts
-
-Before building, remove any stale packaged output so you do not accidentally
-test an old zip.
-
-From the repo root:
-
-```powershell
 Remove-Item -Recurse -Force .\client\out -ErrorAction SilentlyContinue
 ```
 
-If you already extracted a previous Windows build somewhere else, delete that
-old extracted folder too.
+Do not build production from a dirty workspace.
 
-## 5. Build The Windows App
-
-From the repo root:
+## 3. Build On Windows
 
 ```powershell
 cd .\client
 npm run make -- --platform=win32 --arch=x64
 ```
 
-If the build succeeds, the zip will be here:
+Expected artifact:
 
 ```text
-client\out\make\zip\win32\x64\guild-win32-x64-1.0.41.zip
+client\out\make\zip\win32\x64\guild-win32-x64-<version>.zip
 ```
 
-The packaged app folder will also exist here:
+## 4. Validate The Zip
 
-```text
-client\out\guild-win32-x64
+Run the repo validators:
+
+```powershell
+bash ..\scripts\validate-windows-update-zip.sh C:\absolute\path\to\guild-win32-x64-<version>.zip
+bash ..\scripts\validate-packaged-runtime.sh C:\absolute\path\to\guild-win32-x64-<version>.zip
+bash ..\scripts\verify-lane-markers.sh C:\absolute\path\to\guild-win32-x64-<version>.zip
 ```
 
-## 6. Test The Build On Windows
+These must pass before any publish step.
 
-Do not launch the app out of the zip preview.
+## 5. Prove Windows Startup
 
-Instead:
+Do not launch from inside the zip preview.
 
-1. Copy the zip somewhere easy to find
-2. Extract it fully
-3. Open the extracted folder
-4. Run `guild.exe`
-
-Example PowerShell extraction:
+Extract into a fresh folder:
 
 ```powershell
 Expand-Archive `
-  -Path .\client\out\make\zip\win32\x64\guild-win32-x64-1.0.41.zip `
+  -Path .\client\out\make\zip\win32\x64\guild-win32-x64-<version>.zip `
   -DestinationPath .\client\out\test-guild-win32-x64 `
   -Force
 ```
 
-Then launch:
+Launch:
 
 ```powershell
 Start-Process .\client\out\test-guild-win32-x64\guild-win32-x64\guild.exe
 ```
 
-## 7. Quick Sanity Checks
+Required proof:
 
-Before you upload the zip anywhere, verify:
+- app starts without main-process crash
+- app reaches login or home
+- no missing module/runtime file error
+- no secure startup block caused by packaging
 
-- the app launches without the `better-sqlite3` crash
-- login opens
-- the app reaches the server
-- secure startup completes
+This proof is mandatory. A Windows release is not valid without it.
 
-Optional quick file check:
+## 6. Run Lane Smoke
 
-```powershell
-Get-ChildItem .\client\out\make\zip\win32\x64
-```
+Use the checklist in [RELEASE-SMOKE-CHECKLIST.md](/Users/eddifyx/Documents/Projects/guild-main/docs/RELEASE-SMOKE-CHECKLIST.md).
 
-## 8. Upload To FlokiNET
+At minimum for Windows:
 
-If you want to replace the current Windows test zip on FlokiNET from the
-Windows machine directly, use `scp`.
+- fresh login
+- restored session relaunch
+- `/guildchat` post and mention
+- DM notification
+- OS notification when hidden
+- Windows↔Windows voice
 
-From the repo root on Windows:
+## 7. Publish
 
-```powershell
-scp .\client\out\make\zip\win32\x64\guild-win32-x64-1.0.41.zip `
-  eddifyx@82.221.100.187:/home/eddifyx/
-```
-
-Then SSH into the VPS:
-
-```powershell
-ssh eddifyx@82.221.100.187
-```
-
-On the VPS:
+Use the production helper from the repo root:
 
 ```bash
-sudo cp /home/eddifyx/guild-win32-x64-1.0.41.zip /opt/guild/server/updates/guild-win32-x64-1.0.41.zip
+bash ops/1984/publish-update-artifacts.sh \
+  --apply \
+  --manifest /absolute/path/to/server/client-version.json \
+  --version <version> \
+  --target production \
+  /absolute/path/to/guild-win32-x64-<version>.zip
 ```
 
-The download path on FlokiNET is:
+Then verify:
 
-```text
-http://82.221.100.187:3001/updates/guild-win32-x64-1.0.41.zip
-```
+- version API returns the new Windows version
+- live zip URL returns `200`
+
+## 8. Recovery Release Rule
+
+If Windows production is broken:
+
+1. freeze Windows on the last known-good version first
+2. build a new higher recovery version
+3. validate the recovery artifact
+4. prove it boots on Windows
+5. only then publish it
+
+Do not republish a patched recovery artifact without real Windows launch proof.
 
 ## 9. Troubleshooting
 
-### `Cannot find module 'better-sqlite3'`
+### Missing native module
 
-This usually means one of these:
+Usually means:
 
-- you launched an older zip
-- you extracted over an older folder instead of using a fresh one
-- the Windows build did not complete successfully
+- stale extracted folder
+- stale `client/out`
+- incomplete Windows build
+
+### Missing runtime JS file such as `appFlavor.js`
+
+This means the packaged `app.asar` is missing runtime-managed files that Forge
+normally copies into the app bundle.
 
 Fix:
 
-1. delete old extracted folders
-2. delete `client\out`
-3. rebuild
-4. extract to a brand new folder
-
-### Build fails during native dependency compilation
-
-Usually this means the Windows build machine is missing:
-
-- C++ build tools
-- Python
-- a proper Node installation
-
-Re-check the prerequisites in section 1.
-
-### SmartScreen warning
-
-That is expected for an unsigned Windows test build.
-
-If you trust the artifact you just built yourself:
-
-- click `More info`
-- then `Run anyway`
-
-## 10. Current Windows Packaging Notes
-
-Right now this repo produces:
-
-- `guild-win32-x64-1.0.41.zip`
-
-It does **not** currently produce:
-
-- a signed Windows installer
-- a standalone installer `.exe`
-- MSI
-
-If we want a cleaner Windows release flow later, the next step is adding a real
-Windows installer target such as Squirrel or WiX.
+1. rebuild from a clean workspace
+2. rerun `verify:packaged-runtime`
+3. launch the exact zip on Windows before publish

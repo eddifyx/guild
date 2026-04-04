@@ -1,0 +1,59 @@
+{
+  "releaseVersion": "1.0.72",
+  "releaseType": "recovery",
+  "baselineVersion": "1.0.70",
+  "workspacePath": "/Users/eddifyx/Documents/Projects/guild-main",
+  "generatedAt": "2026-04-03T15:51:24Z",
+  "clientFilesChanged": [
+    "/Users/eddifyx/Documents/Projects/guild-main/client/electron/appleVoiceCaptureSessionRuntime.js",
+    "/Users/eddifyx/Documents/Projects/guild-main/client/electron/appleVoiceCaptureSupportRuntime.js",
+    "/Users/eddifyx/Documents/Projects/guild-main/client/electron/native/appleVoiceProcessing/AppleVoiceIsolationCapture.swift",
+    "/Users/eddifyx/Documents/Projects/guild-main/client/forge.config.js",
+    "/Users/eddifyx/Documents/Projects/guild-main/client/package.json",
+    "/Users/eddifyx/Documents/Projects/guild-main/client/src/components/GuildChat/GuildChatDock.jsx",
+    "/Users/eddifyx/Documents/Projects/guild-main/client/src/features/auth/authRuntimeEffects.mjs",
+    "/Users/eddifyx/Documents/Projects/guild-main/client/src/features/auth/nostrConnectSessionState.mjs",
+    "/Users/eddifyx/Documents/Projects/guild-main/client/src/features/layout/layoutGuildChatRuntime.mjs",
+    "/Users/eddifyx/Documents/Projects/guild-main/client/src/features/nostr/profilePublisherSessionRuntime.mjs",
+    "/Users/eddifyx/Documents/Projects/guild-main/client/src/nostr/profilePublisher.js",
+    "/Users/eddifyx/Documents/Projects/guild-main/client/src/package.json",
+    "/Users/eddifyx/Documents/Projects/guild-main/server/client-version.json"
+  ],
+  "serverFilesChanged": [
+    "/Users/eddifyx/Documents/Projects/guild-main/server/client-version.json"
+  ],
+  "approvedBy": "eddifyx",
+  "shipDecision": "approved",
+  "notes": "Artifact validators are green, the exact packaged 1.0.72 Mac zip was extracted and launched successfully on Apple Silicon, and the manual smoke lanes passed for guild creation, /guildchat, notifications, voice, and session restore. The previous packaged Mac production build 1.0.70 was launched against the local server, detected 1.0.72, downloaded the staged update archive, applied the native update path, and relaunched successfully with the app bundle now reporting 1.0.72. Fresh QR/NIP-46 sign-in and immediate profile publish work, while long-idle QR signer freshness remains a waived follow-up risk for this release because current production users do not depend on QR.",
+  "artifacts": [
+    {
+      "platform": "darwin-arm64",
+      "version": "1.0.72",
+      "path": "/Users/eddifyx/Documents/Projects/guild-main/client/out/make/zip/darwin/arm64/guild-darwin-arm64-1.0.72.zip",
+      "sha256": "662013e8cc9ee30b1d7567f8a3ebd93a8d831303edbe84632c5619a48b9c0917",
+      "validators": {
+        "packagedRuntime": "passed",
+        "laneMarkers": "passed",
+        "macUpdateZip": "passed"
+      },
+      "startupProof": {
+        "status": "passed",
+        "tester": "eddifyx",
+        "environment": "macOS (Apple Silicon)",
+        "method": "Fresh extract and launch of guild.app from the exact 1.0.72 published zip, plus Gatekeeper acceptance on the extracted app bundle.",
+        "notes": "Extracted app launched successfully into the real /guild client path with no main-process crash or blank packaged shell."
+      },
+      "smokeChecklist": {
+        "freshLogin": "passed",
+        "restoredSession": "passed",
+        "guildchatPost": "passed",
+        "guildchatMention": "passed",
+        "dmNotifications": "passed",
+        "osNotifications": "passed",
+        "voice": "passed",
+        "updatePath": "passed"
+      }
+    }
+  ],
+  "recoveryReason": "Mac 1.0.70 required a forward recovery for the qualified voice/runtime bundle; Windows remains pinned at 1.0.71 pending its own artifact proof."
+}

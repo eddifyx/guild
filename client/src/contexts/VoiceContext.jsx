@@ -1,11 +1,13 @@
-import { createContext, useContext, useEffect, useMemo, useRef } from 'react';
+import React, { createContext, useContext, useEffect, useMemo, useRef } from 'react';
 import { useVoice } from '../hooks/useVoice';
 import { useVoiceChannels } from '../hooks/useVoiceChannels';
+import { useVoiceStatus } from '../hooks/useVoiceStatus';
 import { useAudioDevices } from '../hooks/useAudioDevices';
 import { useAuth } from './AuthContext';
 import { useGuild } from './GuildContext';
 import { playJoinChime, playLeaveChime, playStreamStartChime, playStreamStopChime } from '../utils/chime';
 import { setVoiceChannelParticipants } from '../crypto/voiceEncryption';
+import { resolveVoiceContextValue } from './voiceContextFallback.mjs';
 
 const VoiceContext = createContext(null);
 const VoicePresenceContext = createContext(null);
@@ -16,6 +18,7 @@ export function VoiceProvider({ children }) {
   const { currentGuild } = useGuild();
   const voice = useVoice();
   const channels = useVoiceChannels(currentGuild);
+  const status = useVoiceStatus(!!currentGuild);
   const devices = useAudioDevices();
 
   const prevChannelIdRef = useRef(null);
@@ -92,6 +95,85 @@ export function VoiceProvider({ children }) {
     voice.setOutputDevice(devices.selectedOutput);
   }, [devices.selectedOutput, voice.setOutputDevice]);
 
+  useEffect(() => {
+    if (typeof window === 'undefined') return undefined;
+
+    const bridge = {
+      leaveForUpdate: async () => {
+        if (voice.screenSharing) {
+          voice.stopScreenShare();
+        }
+        if (voice.channelId) {
+          await voice.leaveChannel();
+        }
+      },
+    };
+
+    window.__guildVoiceBridge = bridge;
+
+    return () => {
+      if (window.__guildVoiceBridge === bridge) {
+        delete window.__guildVoiceBridge;
+      }
+    };
+  }, [voice.channelId, voice.leaveChannel, voice.screenSharing, voice.stopScreenShare]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return undefined;
+
+    const debugState = {
+      userId: user?.userId || null,
+      userName: user?.name || null,
+      channelId: voice.channelId,
+      muted: voice.muted,
+      deafened: voice.deafened,
+      speaking: voice.speaking,
+      joinError: voice.joinError,
+      voiceProcessingMode: voice.voiceProcessingMode,
+      liveVoiceFallbackReason: voice.liveVoiceFallbackReason,
+      voiceDiagnostics: voice.voiceDiagnostics,
+      voiceE2E: voice.voiceE2E,
+      e2eWarning: voice.e2eWarning,
+      read() {
+        return {
+          userId: user?.userId || null,
+          userName: user?.name || null,
+          channelId: voice.channelId,
+          muted: voice.muted,
+          deafened: voice.deafened,
+          speaking: voice.speaking,
+          joinError: voice.joinError,
+          voiceProcessingMode: voice.voiceProcessingMode,
+          liveVoiceFallbackReason: voice.liveVoiceFallbackReason,
+          voiceDiagnostics: voice.voiceDiagnostics,
+          voiceE2E: voice.voiceE2E,
+          e2eWarning: voice.e2eWarning,
+        };
+      },
+    };
+
+    window.__guildVoiceDebug = debugState;
+
+    return () => {
+      if (window.__guildVoiceDebug === debugState) {
+        delete window.__guildVoiceDebug;
+      }
+    };
+  }, [
+    user?.userId,
+    user?.name,
+    voice.channelId,
+    voice.deafened,
+    voice.e2eWarning,
+    voice.joinError,
+    voice.liveVoiceFallbackReason,
+    voice.muted,
+    voice.speaking,
+    voice.voiceDiagnostics,
+    voice.voiceE2E,
+    voice.voiceProcessingMode,
+  ]);
+
   const voiceValue = useMemo(() => ({
     channelId: voice.channelId,
     muted: voice.muted,
@@ -102,8 +184,10 @@ export function VoiceProvider({ children }) {
     toggleMute: voice.toggleMute,
     toggleDeafen: voice.toggleDeafen,
     setUserVolume: voice.setUserVolume,
+    voiceDiagnostics: voice.voiceDiagnostics,
     screenSharing: voice.screenSharing,
     screenShareStream: voice.screenShareStream,
+    screenShareDiagnostics: voice.screenShareDiagnostics,
     startScreenShare: voice.startScreenShare,
     stopScreenShare: voice.stopScreenShare,
     incomingScreenShares: voice.incomingScreenShares,
@@ -114,8 +198,11 @@ export function VoiceProvider({ children }) {
     clearScreenShareError: voice.clearScreenShareError,
     voiceE2E: voice.voiceE2E,
     e2eWarning: voice.e2eWarning,
+    voiceStatus: status.voiceStatus,
+    refreshVoiceStatus: status.refreshVoiceStatus,
     voiceChannels: channels.voiceChannels,
     createVoiceChannel: channels.createVoiceChannel,
+    renameVoiceChannel: channels.renameVoiceChannel,
     deleteVoiceChannel: channels.deleteVoiceChannel,
   }), [
     voice.channelId,
@@ -127,8 +214,10 @@ export function VoiceProvider({ children }) {
     voice.toggleMute,
     voice.toggleDeafen,
     voice.setUserVolume,
+    voice.voiceDiagnostics,
     voice.screenSharing,
     voice.screenShareStream,
+    voice.screenShareDiagnostics,
     voice.startScreenShare,
     voice.stopScreenShare,
     voice.incomingScreenShares,
@@ -139,8 +228,11 @@ export function VoiceProvider({ children }) {
     voice.clearScreenShareError,
     voice.voiceE2E,
     voice.e2eWarning,
+    status.voiceStatus,
+    status.refreshVoiceStatus,
     channels.voiceChannels,
     channels.createVoiceChannel,
+    channels.renameVoiceChannel,
     channels.deleteVoiceChannel,
   ]);
 
@@ -192,18 +284,15 @@ export function VoiceProvider({ children }) {
 
 export function useVoiceContext() {
   const ctx = useContext(VoiceContext);
-  if (!ctx) throw new Error('useVoiceContext must be inside VoiceProvider');
-  return ctx;
+  return resolveVoiceContextValue(ctx, { kind: 'voice' });
 }
 
 export function useVoicePresenceContext() {
   const ctx = useContext(VoicePresenceContext);
-  if (!ctx) throw new Error('useVoicePresenceContext must be inside VoiceProvider');
-  return ctx;
+  return resolveVoiceContextValue(ctx, { kind: 'presence' });
 }
 
 export function useVoiceSettingsContext() {
   const ctx = useContext(VoiceSettingsContext);
-  if (!ctx) throw new Error('useVoiceSettingsContext must be inside VoiceProvider');
-  return ctx;
+  return resolveVoiceContextValue(ctx, { kind: 'settings' });
 }

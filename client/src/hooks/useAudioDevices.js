@@ -1,13 +1,19 @@
 import { useState, useEffect, useCallback } from 'react';
+import { normalizeVoiceInputDeviceId } from '../features/voice/voicePreferences.mjs';
+
+function normalizeOutputSelection(deviceId) {
+  const normalized = String(deviceId || '').trim();
+  return normalized === 'default' ? '' : normalized;
+}
 
 export function useAudioDevices() {
   const [inputDevices, setInputDevices] = useState([]);
   const [outputDevices, setOutputDevices] = useState([]);
   const [selectedInput, setSelectedInput] = useState(
-    () => localStorage.getItem('voice:inputDeviceId') || ''
+    () => normalizeVoiceInputDeviceId(localStorage.getItem('voice:inputDeviceId') || '')
   );
   const [selectedOutput, setSelectedOutput] = useState(
-    () => localStorage.getItem('voice:outputDeviceId') || ''
+    () => normalizeOutputSelection(localStorage.getItem('voice:outputDeviceId') || '')
   );
 
   const enumerate = useCallback(async () => {
@@ -18,15 +24,17 @@ export function useAudioDevices() {
       setInputDevices(nextInputDevices);
       setOutputDevices(nextOutputDevices);
       setSelectedInput((prev) => {
-        if (!prev || nextInputDevices.some((device) => device.deviceId === prev)) {
-          return prev;
+        const normalizedPrev = normalizeVoiceInputDeviceId(prev);
+        if (!normalizedPrev || nextInputDevices.some((device) => device.deviceId === normalizedPrev)) {
+          return normalizedPrev;
         }
         localStorage.setItem('voice:inputDeviceId', '');
         return '';
       });
       setSelectedOutput((prev) => {
-        if (!prev || nextOutputDevices.some((device) => device.deviceId === prev)) {
-          return prev;
+        const normalizedPrev = normalizeOutputSelection(prev);
+        if (!normalizedPrev || nextOutputDevices.some((device) => device.deviceId === normalizedPrev)) {
+          return normalizedPrev;
         }
         localStorage.setItem('voice:outputDeviceId', '');
         return '';
@@ -43,13 +51,15 @@ export function useAudioDevices() {
   }, [enumerate]);
 
   const selectInput = useCallback((deviceId) => {
-    setSelectedInput(deviceId);
-    localStorage.setItem('voice:inputDeviceId', deviceId);
+    const normalizedDeviceId = normalizeVoiceInputDeviceId(deviceId);
+    setSelectedInput(normalizedDeviceId);
+    localStorage.setItem('voice:inputDeviceId', normalizedDeviceId);
   }, []);
 
   const selectOutput = useCallback((deviceId) => {
-    setSelectedOutput(deviceId);
-    localStorage.setItem('voice:outputDeviceId', deviceId);
+    const normalizedDeviceId = normalizeOutputSelection(deviceId);
+    setSelectedOutput(normalizedDeviceId);
+    localStorage.setItem('voice:outputDeviceId', normalizedDeviceId);
   }, []);
 
   return {

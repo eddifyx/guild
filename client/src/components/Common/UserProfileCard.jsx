@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { fetchCurrentProfile } from '../../nostr/profilePublisher';
 import { nip19 } from 'nostr-tools';
 import Avatar from './Avatar';

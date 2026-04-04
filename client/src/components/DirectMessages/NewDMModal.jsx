@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { lookupUserByNpub } from '../../api';
 import { useAuth } from '../../contexts/AuthContext';
 import { useGuild } from '../../contexts/GuildContext';

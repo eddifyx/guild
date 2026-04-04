@@ -75,15 +75,38 @@ export function useVoiceChannels(guildId) {
       setVoiceChannelsState(prev => prev.filter(ch => ch.id !== channelId));
     };
 
+    const handleRenamed = ({ channelId, name }) => {
+      setVoiceChannelsState(prev => prev.map(ch => (
+        ch.id === channelId
+          ? { ...ch, name }
+          : ch
+      )));
+    };
+
     socket.on('voice:channel-update', handleUpdate);
     socket.on('voice:channel-created', handleCreated);
     socket.on('voice:channel-deleted', handleDeleted);
+    socket.on('voice:channel-renamed', handleRenamed);
     return () => {
       socket.off('voice:channel-update', handleUpdate);
       socket.off('voice:channel-created', handleCreated);
       socket.off('voice:channel-deleted', handleDeleted);
+      socket.off('voice:channel-renamed', handleRenamed);
     };
   }, [socket, guildId, refreshVoiceChannels, setVoiceChannelsState]);
+
+  useEffect(() => {
+    if (!socket || !guildId) return;
+
+    const handleConnect = () => {
+      refreshVoiceChannels().catch(console.error);
+    };
+
+    socket.on('connect', handleConnect);
+    return () => {
+      socket.off('connect', handleConnect);
+    };
+  }, [socket, guildId, refreshVoiceChannels]);
 
   const createVoiceChannel = useCallback(async (name) => {
     const channel = await api('/api/voice/channels', {
@@ -99,5 +122,18 @@ export function useVoiceChannels(guildId) {
     setVoiceChannelsState(prev => prev.filter(ch => ch.id !== id));
   }, [setVoiceChannelsState]);
 
-  return { voiceChannels, createVoiceChannel, deleteVoiceChannel };
+  const renameVoiceChannel = useCallback(async (id, name) => {
+    const updated = await api(`/api/voice/channels/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ name }),
+    });
+    setVoiceChannelsState(prev => prev.map(ch => (
+      ch.id === id
+        ? { ...ch, name: updated.name }
+        : ch
+    )));
+    return updated;
+  }, [setVoiceChannelsState]);
+
+  return { voiceChannels, createVoiceChannel, renameVoiceChannel, deleteVoiceChannel };
 }

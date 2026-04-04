@@ -38,7 +38,7 @@ function hasCompatClientTag(tags) {
   );
 }
 
-function verifyBundleAttestationEvent(event, bundle, expectedNpub = null) {
+async function verifyBundleAttestationEvent(event, bundle, expectedNpub = null) {
   if (!event || typeof event !== 'object') return false;
   if (!verifyNostrEvent(event)) return false;
   if (![BUNDLE_ATTESTATION_KIND, BUNDLE_ATTESTATION_COMPAT_KIND].includes(event.kind)) return false;
@@ -48,7 +48,7 @@ function verifyBundleAttestationEvent(event, bundle, expectedNpub = null) {
 
   if (expectedNpub) {
     try {
-      if (event.pubkey !== npubToPubkey(expectedNpub)) return false;
+      if (event.pubkey !== await npubToPubkey(expectedNpub)) return false;
     } catch {
       return false;
     }

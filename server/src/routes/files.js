@@ -7,6 +7,8 @@ const {
   getSession,
   hashToken,
   isRoomMember,
+  isGuildMember,
+  usersShareGuild,
 } = require('../db');
 const auth = require('../middleware/authMiddleware');
 
@@ -25,12 +27,18 @@ function resolveAuthenticatedUser(req) {
 function canAccessUploadedFile(file, userId) {
   if (!file || !userId) return false;
   if (file.uploaded_by === userId) return true;
+  if (file.guildchat_guild_id) {
+    return !!isGuildMember.get(file.guildchat_guild_id, userId);
+  }
   if (!file.message_id) return false;
   if (file.room_id) {
     return !!isRoomMember.get(file.room_id, userId);
   }
   if (file.dm_user_a && file.dm_user_b) {
-    return file.dm_user_a === userId || file.dm_user_b === userId;
+    if (file.dm_user_a !== userId && file.dm_user_b !== userId) {
+      return false;
+    }
+    return !!usersShareGuild.get(file.dm_user_a, file.dm_user_b);
   }
   return false;
 }
@@ -85,7 +93,7 @@ router.delete('/:id', auth, (req, res) => {
   if (file.uploaded_by !== req.userId) {
     return res.status(403).json({ error: 'Only the uploader can delete this file' });
   }
-  if (file.message_id) {
+  if (file.message_id || file.guildchat_message_id) {
     return res.status(409).json({ error: 'This file is already attached to a message' });
   }
 

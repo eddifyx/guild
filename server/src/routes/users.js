@@ -1,14 +1,19 @@
 const express = require('express');
 const auth = require('../middleware/authMiddleware');
 const {
-  getVisibleUsers,
   getUserByNpub,
   getUserById,
+  listVisibleGuildmateIds,
+  listVisibleContactUserIds,
   updateUserUsername,
   updateUserLud16,
   updateUserProfilePicture,
 } = require('../db');
 const { broadcastPresenceUpdates } = require('../socket/presenceHandler');
+const {
+  buildVisibleUserIdSet,
+  buildVisibleUsers,
+} = require('../domain/users/visibility');
 
 const router = express.Router();
 
@@ -31,9 +36,21 @@ function parseProfilePictureUrl(url) {
   return { ok: true, value: trimmed.slice(0, 2048) };
 }
 
+function getVisibleUsersForRequester(userId) {
+  const visibleUserIds = buildVisibleUserIdSet({
+    requesterUserId: userId,
+    guildmateRows: listVisibleGuildmateIds.all(userId),
+    contactRows: listVisibleContactUserIds.all(userId),
+  });
+
+  return buildVisibleUsers(
+    Array.from(visibleUserIds).map((visibleUserId) => getUserById.get(visibleUserId))
+  );
+}
+
 router.get('/', auth, (req, res) => {
   const onlineIds = getOnlineUserIds();
-  const users = getVisibleUsers(req.userId);
+  const users = getVisibleUsersForRequester(req.userId);
   res.json(users.map((user) => ({ ...user, online: onlineIds.has(user.id) })));
 });
 
@@ -75,7 +92,7 @@ router.post('/check-npubs', auth, (req, res) => {
 
 router.get('/online', auth, (req, res) => {
   const onlineIds = getOnlineUserIds();
-  const users = getVisibleUsers(req.userId)
+  const users = getVisibleUsersForRequester(req.userId)
     .filter((user) => onlineIds.has(user.id))
     .map((user) => ({ ...user, online: true }));
   res.json(users);

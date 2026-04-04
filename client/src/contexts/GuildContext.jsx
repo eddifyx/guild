@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, useCallback, useEffect, useMemo } from 'react';
+import React, { createContext, useContext, useState, useCallback, useEffect, useMemo } from 'react';
 import { api } from '../api';
 import { useSocket } from './SocketContext';
 import { rememberUsers } from '../crypto/identityDirectory.js';
@@ -6,7 +6,7 @@ import { rememberUsers } from '../crypto/identityDirectory.js';
 const GuildContext = createContext(null);
 
 export function GuildProvider({ children }) {
-  const { socket } = useSocket();
+  const { socket, connected } = useSocket();
   const [myGuild, setMyGuild] = useState(null); // The single guild object (or null)
   const [currentGuildData, setCurrentGuildData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -57,6 +57,14 @@ export function GuildProvider({ children }) {
   useEffect(() => {
     fetchMyGuild();
   }, [fetchMyGuild]);
+
+  // Fresh profiles can occasionally land on onboarding before their guild
+  // membership hydrates. Once the socket is up, retry the guild bootstrap if
+  // we still look guild-less.
+  useEffect(() => {
+    if (!connected || loading || currentGuild) return;
+    fetchMyGuild();
+  }, [connected, loading, currentGuild, fetchMyGuild]);
 
   // Listen for guild socket events
   useEffect(() => {

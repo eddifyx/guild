@@ -74,8 +74,8 @@ export function getPreferredNoiseSuppressionImplementation(platformTarget = getR
   if (prefersAppleSystemVoiceIsolation(platformTarget)) {
     return {
       id: VOICE_NOISE_SUPPRESSION_BACKENDS.APPLE,
-      label: 'System Voice Processing',
-      detail: 'Uses the best available cleanup path when your input stays on Default.',
+      label: 'Mac Hardware Processing',
+      detail: 'Uses Apple\'s native voice-processing path when your input stays on Default. macOS owns the Mic Mode choice, so Voice Isolation is selected in Control Center, not by the app.',
     };
   }
 
@@ -84,6 +84,22 @@ export function getPreferredNoiseSuppressionImplementation(platformTarget = getR
     label: 'Built-in Cleanup',
     detail: 'Uses the best available cleanup path for your device.',
   };
+}
+
+export function getAppleHardwareProcessingGuidance({
+  platformTarget = getRuntimePlatformTarget(),
+  selectedInput = '',
+  lowLatencyEnabled = false,
+} = {}) {
+  if (!prefersAppleSystemVoiceIsolation(platformTarget) || lowLatencyEnabled) {
+    return null;
+  }
+
+  if (selectedInput) {
+    return 'Mac hardware cleanup only stays active when Input Device is set to Default. Choosing a specific mic switches /guild to its fallback cleanup path instead.';
+  }
+
+  return 'Noise Suppression is routed through Apple\'s native voice-processing path. For the strongest cleanup, choose Voice Isolation in macOS Control Center. /guild can expose Mic Modes, but macOS keeps that choice under user control.';
 }
 
 export function persistVoiceProcessingMode(mode) {
@@ -264,7 +280,7 @@ export function getVoiceProcessingProfile(
       id: normalized,
       label: 'Ultra Low Latency',
       shortLabel: 'Ultra Low',
-      description: 'Best with headsets. Disables browser echo cancellation for the lowest delay.',
+      description: 'Headset mic recommended. Disables browser echo cancellation for the lowest delay, so built-in speakers and laptop mics can feed back.',
       browserAudio: {
         noiseSuppression: false,
         echoCancellation: false,
@@ -315,6 +331,22 @@ export function buildVoiceCaptureConstraints({
       channelCount: { ideal: profile.browserAudio.channelCount },
       ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
     },
+  };
+}
+
+export function buildPlainVoiceCaptureConstraints({
+  deviceId,
+} = {}) {
+  if (deviceId) {
+    return {
+      audio: {
+        deviceId: { exact: deviceId },
+      },
+    };
+  }
+
+  return {
+    audio: true,
   };
 }
 

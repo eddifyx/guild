@@ -1,10 +1,14 @@
-import { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useGuild } from '../../contexts/GuildContext';
 import { useGuilds } from '../../hooks/useGuilds';
 import { fetchProfile, searchProfiles } from '../../utils/nostr';
 import { publishDM } from '../../nostr/profilePublisher';
 import { nip19 } from 'nostr-tools';
-import Avatar from '../Common/Avatar';
+import {
+  InviteGuildModalCodePanel,
+  InviteGuildModalNostrPanel,
+  InviteGuildModalTabs,
+} from './InviteGuildModalPanels.jsx';
 
 export default function InviteGuildModal({ onClose }) {
   const { currentGuild, currentGuildData } = useGuild();
@@ -147,123 +151,38 @@ export default function InviteGuildModal({ onClose }) {
           <button onClick={onClose} style={styles.closeBtn}>&times;</button>
         </div>
 
-        {/* Tabs */}
-        <div style={styles.tabs}>
-          {[
-            { key: 'code', label: 'Invite Code' },
-            { key: 'nostr', label: 'Nostr DM' },
-          ].map(t => (
-            <button
-              key={t.key}
-              onClick={() => setTab(t.key)}
-              style={{
-                ...styles.tabBtn,
-                borderBottom: tab === t.key ? '2px solid var(--accent, #40FF40)' : '2px solid transparent',
-                color: tab === t.key ? 'var(--text-primary)' : 'var(--text-muted)',
-              }}
-            >
-              {t.label}
-            </button>
-          ))}
-        </div>
+        <InviteGuildModalTabs tab={tab} setTab={setTab} styles={styles} />
 
         <div style={styles.content}>
-          {/* ===== CODE TAB ===== */}
           {tab === 'code' && (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-              <div style={{ fontSize: 13, color: 'var(--text-secondary)' }}>
-                Share this invite code to let others join your guild.
-              </div>
-
-              {codeLoading ? (
-                <div style={styles.emptyState}>Loading...</div>
-              ) : codeError ? (
-                <div style={{ fontSize: 12, color: 'var(--error, #ff4040)' }}>{codeError}</div>
-              ) : (
-                <>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                    <input
-                      readOnly
-                      value={inviteCode || 'No invite code'}
-                      style={styles.codeInput}
-                    />
-                    <button onClick={handleCopyCode} style={styles.actionBtn}>
-                      {copied === 'code' ? 'Copied!' : 'Copy Code'}
-                    </button>
-                  </div>
-
-                  <button onClick={handleCopyMessage} style={styles.secondaryBtn}>
-                    {copied === 'message' ? 'Copied!' : 'Copy Invite Message'}
-                  </button>
-
-                  <button onClick={handleRegenerate} style={{ ...styles.secondaryBtn, color: 'var(--text-muted)' }}>
-                    {copied === 'regen' ? 'Regenerated!' : 'Regenerate Code'}
-                  </button>
-                </>
-              )}
-            </div>
+            <InviteGuildModalCodePanel
+              inviteCode={inviteCode}
+              codeLoading={codeLoading}
+              codeError={codeError}
+              copied={copied}
+              styles={styles}
+              onCopyCode={handleCopyCode}
+              onCopyMessage={handleCopyMessage}
+              onRegenerate={handleRegenerate}
+            />
           )}
 
-          {/* ===== NOSTR DM TAB ===== */}
           {tab === 'nostr' && (
-            <>
-              <div style={{ paddingBottom: 12 }}>
-                <div style={{ fontSize: 13, color: 'var(--text-secondary)', marginBottom: 10 }}>
-                  Send a guild invite via encrypted Nostr DM.
-                </div>
-                <input
-                  type="text"
-                  placeholder="Search by name or paste npub..."
-                  value={query}
-                  onChange={e => { setQuery(e.target.value); setDmMsg(''); }}
-                  style={styles.searchInput}
-                  autoFocus
-                />
-                {dmMsg && (
-                  <div style={{
-                    fontSize: 11,
-                    color: dmMsg.includes('!') ? 'var(--success, #40ff40)' : 'var(--error, #ff4040)',
-                    marginTop: 4,
-                  }}>
-                    {dmMsg}
-                  </div>
-                )}
-              </div>
-
-              {!inviteCode && !codeLoading && (
-                <div style={{ fontSize: 12, color: 'var(--error, #ff4040)', marginBottom: 8 }}>
-                  No invite code available. Generate one in the Code tab first.
-                </div>
-              )}
-
-              {searching ? (
-                <div style={styles.emptyState}>Searching...</div>
-              ) : query.trim().length >= 2 && searchResults.length === 0 ? (
-                <div style={styles.emptyState}>No users found</div>
-              ) : searchResults.length > 0 ? (
-                searchResults.map(r => (
-                  <div key={r.npub} style={styles.resultRow}>
-                    <Avatar username={r.name || r.npub.slice(0, 8)} size={36} profilePicture={r.picture} />
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={styles.nameText}>{r.name || r.npub.slice(0, 16) + '...'}</div>
-                      <div style={styles.npubText}>{r.npub.slice(0, 20)}...{r.npub.slice(-6)}</div>
-                    </div>
-                    <button
-                      onClick={() => handleSendDM(r.npub)}
-                      disabled={sendingNpub === r.npub || !inviteCode}
-                      style={{
-                        ...styles.actionBtn,
-                        opacity: (sendingNpub === r.npub || !inviteCode) ? 0.5 : 1,
-                      }}
-                    >
-                      {sendingNpub === r.npub ? '...' : 'Send Invite'}
-                    </button>
-                  </div>
-                ))
-              ) : (
-                <div style={styles.emptyState}>Search for Nostr users to send them a guild invite</div>
-              )}
-            </>
+            <InviteGuildModalNostrPanel
+              query={query}
+              setQuery={(value) => {
+                setQuery(value);
+                setDmMsg('');
+              }}
+              dmMsg={dmMsg}
+              inviteCode={inviteCode}
+              codeLoading={codeLoading}
+              searching={searching}
+              searchResults={searchResults}
+              styles={styles}
+              sendingNpub={sendingNpub}
+              onSendDM={handleSendDM}
+            />
           )}
         </div>
       </div>

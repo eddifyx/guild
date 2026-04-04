@@ -56,7 +56,7 @@ In `client/src/utils/nostrConnect.js`:
 - QR relay is now `wss://nos.lol`
 - `createNostrConnectSession()` treats `BunkerSigner.fromURI()` as already connected
 - redundant post-QR `.connect()` call was removed
-- QR flow skips redundant `get_public_key` when `signer.bp.pubkey` is already known
+- QR flow skips redundant `get_public_key` only when the actual account pubkey is already known
 - relay cooldowns remain in place to avoid request bursts
 - relay/subscription/signer tracing remains in place
 

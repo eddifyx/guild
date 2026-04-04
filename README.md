@@ -13,9 +13,21 @@
 ## Repo Layout
 
 - `client/` Electron + React desktop client
+- `mobile/` Expo + EAS mobile scaffold for iOS TestFlight and Android store builds
 - `server/` Express + Socket.IO backend
 - `docs/` supporting implementation notes
 - `scripts/` local dev helpers
+
+## Mobile
+
+The repo now includes a dedicated `mobile/` workspace for managed iOS and
+Android builds. It is the right path for TestFlight and Zapstore packaging,
+but it is not yet a feature-complete port of the Electron client. The current
+secure messaging, persistence, and media stack still lives in Electron-native
+runtime code.
+
+See [Mobile App Runbook](./docs/MOBILE-APP-RUNBOOK.md) for the current mobile
+release flow and the remaining productization work.
 
 ## Development
 
@@ -42,6 +54,10 @@ npm run dev:client:profile -- E
 
 ## Docs
 
+- [Docs Index](./docs/README.md)
+- [Release SOP](./docs/RELEASE-SOP.md)
+- [Release Smoke Checklist](./docs/RELEASE-SMOKE-CHECKLIST.md)
+- [Release Lanes](./docs/ARCHITECTURE-LANES.md)
 - [Guild System](./docs/GUILD-SYSTEM.md)
 - [DeepFilter Integration](./docs/deepfilter-integration.md)
 

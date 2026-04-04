@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useMemo, useState } from 'react';
+import React, { createContext, useContext, useEffect, useMemo, useState } from 'react';
 import { connectSocket, disconnectSocket } from '../socket';
 import { useAuth } from './AuthContext';
 

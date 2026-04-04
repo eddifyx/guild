@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import React, { useState } from 'react';
 import Modal from '../Common/Modal';
 
 export default function CreateRoomModal({ onClose, onCreate }) {
@@ -21,15 +21,15 @@ export default function CreateRoomModal({ onClose, onCreate }) {
   };
 
   return (
-    <Modal title="Create Room" onClose={onClose}>
+    <Modal title="Create Board" onClose={onClose}>
       <form onSubmit={handleSubmit}>
         <input
           type="text"
-          placeholder="Room name"
+          placeholder="Board name"
           value={name}
           onChange={(e) => setName(e.target.value)}
           autoFocus
-          maxLength={50}
+          maxLength={100}
           style={{
             width: '100%',
             padding: '10px 14px',
@@ -79,7 +79,7 @@ export default function CreateRoomModal({ onClose, onCreate }) {
               transition: 'opacity 0.15s',
             }}
           >
-            {loading ? 'Creating...' : 'Create'}
+            {loading ? 'Creating...' : 'Create Board'}
           </button>
         </div>
       </form>

@@ -1,7 +1,8 @@
-import { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { formatDistanceToNow } from 'date-fns';
 import Avatar from '../Common/Avatar';
 import FilePreview from './FilePreview';
+import { getConversationDecryptFailureMessage } from '../../features/messaging/messageDecryptPresentation.mjs';
 
 export default function MessageBubble({ message, isOwn, showHeader, prevSameSender, onEdit, onDelete }) {
   const [hovered, setHovered] = useState(false);
@@ -9,6 +10,7 @@ export default function MessageBubble({ message, isOwn, showHeader, prevSameSend
   const [editText, setEditText] = useState('');
   const [confirming, setConfirming] = useState(false);
   const editRef = useRef(null);
+  const displayName = (message.sender_name || '').trim() || 'Unknown member';
 
   const time = (() => {
     try {
@@ -71,7 +73,7 @@ export default function MessageBubble({ message, isOwn, showHeader, prevSameSend
       <div style={{ width: 36, minWidth: 36 }}>
         {!prevSameSender && (
           <Avatar
-            username={message.sender_name}
+            username={displayName}
             color={message.sender_color}
             size={36}
             profilePicture={message.sender_picture}
@@ -87,7 +89,7 @@ export default function MessageBubble({ message, isOwn, showHeader, prevSameSend
               fontSize: 13,
               color: 'var(--text-primary)',
             }}>
-              {message.sender_name}
+              {displayName}
             </span>
             <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>{time}</span>
           </div>
@@ -157,7 +159,7 @@ export default function MessageBubble({ message, isOwn, showHeader, prevSameSend
                 gap: 4,
               }}>
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/></svg>
-                Message could not be decrypted
+                {message._decryptionError || getConversationDecryptFailureMessage(message._decryptionBucket)}
               </div>
             ) : message.content ? (
               <div className="message-text" style={{

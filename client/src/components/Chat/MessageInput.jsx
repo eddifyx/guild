@@ -1,21 +1,24 @@
-import { useState, useRef, useCallback, useEffect } from 'react';
+import React, { memo, useMemo, useState, useRef, useCallback } from 'react';
 import { useSocket } from '../../contexts/SocketContext';
 import { deleteChatAttachmentUpload, uploadChatAttachment } from '../../utils/chatUploads';
 import FileUploadButton from '../Common/FileUploadButton';
+import {
+  getMessageInputActiveState,
+  getMessageInputPlaceholder,
+  revokePendingPreview,
+} from '../../features/messaging/messageInputModel.mjs';
+import {
+  clearMessageInputDragState,
+  createMessageInputAttachmentUploader,
+  createMessageInputDragHandlers,
+  createMessageInputSendHandler,
+  createPendingFileRemovalHandler,
+  emitMessageInputTyping,
+} from '../../features/messaging/messageInputRuntime.mjs';
+import { useMessageInputRuntimeEffects } from '../../features/messaging/useMessageInputRuntimeEffects.mjs';
 
 
-function revokePendingPreview(file) {
-  if (file?._previewUrl) {
-    URL.revokeObjectURL(file._previewUrl);
-  }
-}
-
-function hasFileDrag(dataTransfer) {
-  if (!dataTransfer?.types) return false;
-  return Array.from(dataTransfer.types).includes('Files');
-}
-
-export default function MessageInput({ onSend, conversation }) {
+function MessageInput({ onSend, conversation }) {
   const [text, setText] = useState('');
   const [uploading, setUploading] = useState(false);
   const [dragActive, setDragActive] = useState(false);
@@ -27,23 +30,26 @@ export default function MessageInput({ onSend, conversation }) {
   const textareaRef = useRef(null);
   const pendingFilesRef = useRef([]);
   const dragDepthRef = useRef(0);
-
-  useEffect(() => {
-    pendingFilesRef.current = pendingFiles;
-  }, [pendingFiles]);
-
-  useEffect(() => () => {
-    pendingFilesRef.current.forEach(revokePendingPreview);
-  }, []);
-
+  const sendingRef = useRef(false);
 
   const emitTyping = useCallback((start) => {
-    if (!socket || !conversation) return;
-    const payload = conversation.type === 'room'
-      ? { roomId: conversation.id, toUserId: null }
-      : { roomId: null, toUserId: conversation.id };
-    socket.emit(start ? 'typing:start' : 'typing:stop', payload);
+    emitMessageInputTyping({
+      socket,
+      conversation,
+      start,
+    });
   }, [socket, conversation]);
+
+  useMessageInputRuntimeEffects({
+    pendingFiles,
+    pendingFilesRef,
+    emitTypingFn: emitTyping,
+    typingRef,
+    typingTimeoutRef,
+    textareaRef,
+    text,
+    conversation,
+  });
 
   const handleChange = (e) => {
     setText(e.target.value);
@@ -59,28 +65,31 @@ export default function MessageInput({ onSend, conversation }) {
     }, 3000);
   };
 
-  const handleSend = async () => {
-    const trimmed = text.trim();
-    if (!trimmed && pendingFiles.length === 0) return;
-
-    setInputError('');
-    try {
-      await onSend(trimmed || null, pendingFiles.length > 0 ? pendingFiles : undefined);
-      setText('');
-      setPendingFiles([]);
-      typingRef.current = false;
-      clearTimeout(typingTimeoutRef.current);
-      emitTyping(false);
-      textareaRef.current?.focus();
-    } catch (err) {
-      setInputError(err?.message || 'Secure send failed. Try again.');
-    }
-  };
+  const handleSend = useMemo(() => createMessageInputSendHandler({
+    getSending: () => sendingRef.current,
+    setSendingFn: (value) => {
+      sendingRef.current = value;
+    },
+    getText: () => text,
+    getPendingFiles: () => pendingFilesRef.current,
+    setInputErrorFn: setInputError,
+    setTextFn: setText,
+    pendingFilesRef,
+    setPendingFilesFn: setPendingFiles,
+    typingRef,
+    typingTimeoutRef,
+    emitTypingFn: emitTyping,
+    clearTimeoutFn: clearTimeout,
+    requestAnimationFrameFn: requestAnimationFrame,
+    focusFn: () => textareaRef.current?.focus(),
+    onSend,
+  }), [emitTyping, onSend, text]);
 
   const handleKeyDown = (e) => {
+    if (e.nativeEvent?.isComposing) return;
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
-      handleSend();
+      void handleSend();
     }
   };
 
@@ -89,25 +98,13 @@ export default function MessageInput({ onSend, conversation }) {
     setPendingFiles(prev => [...prev, fileData]);
   };
 
-  const uploadPendingAttachments = useCallback(async (files, sourceLabel) => {
-    const uploadableFiles = Array.from(files || []).filter(Boolean);
-    if (uploadableFiles.length === 0 || uploading) return;
-
-    setUploading(true);
-    setInputError('');
-    try {
-      const uploaded = [];
-      for (const file of uploadableFiles) {
-        uploaded.push(await uploadChatAttachment(file));
-      }
-      setPendingFiles(prev => [...prev, ...uploaded]);
-    } catch (err) {
-      console.error(sourceLabel + ' upload failed:', err);
-      setInputError(err?.message || 'Secure attachment upload failed.');
-    } finally {
-      setUploading(false);
-    }
-  }, [uploading]);
+  const uploadPendingAttachments = useMemo(() => createMessageInputAttachmentUploader({
+    getUploading: () => uploading,
+    setUploadingFn: setUploading,
+    setInputErrorFn: setInputError,
+    setPendingFilesFn: setPendingFiles,
+    uploadAttachmentFn: uploadChatAttachment,
+  }), [uploading]);
 
   const handlePaste = async (e) => {
     const items = e.clipboardData?.items;
@@ -126,78 +123,33 @@ export default function MessageInput({ onSend, conversation }) {
     await uploadPendingAttachments(imageFiles, 'Paste');
   };
 
-  useEffect(() => {
-    const el = textareaRef.current;
-    if (el) {
-      el.style.height = 'auto';
-      el.style.height = Math.min(el.scrollHeight, 120) + 'px';
-    }
-  }, [text]);
-
-  useEffect(() => {
-    if (conversation?.type !== 'dm') return undefined;
-    const frameId = requestAnimationFrame(() => {
-      const el = textareaRef.current;
-      if (!el) return;
-      el.focus();
-      const length = el.value?.length || 0;
-      el.setSelectionRange(length, length);
-    });
-    return () => cancelAnimationFrame(frameId);
-  }, [conversation?.id, conversation?.type]);
-
-  const removePendingFile = async (index) => {
-    const file = pendingFiles[index];
-    setPendingFiles(prev => prev.filter((_, i) => i !== index));
-    revokePendingPreview(file);
-    try {
-      await deleteChatAttachmentUpload(file);
-    } catch (err) {
-      console.warn('Failed to delete pending upload:', err?.message || err);
-    }
-  };
+  const removePendingFile = useMemo(() => createPendingFileRemovalHandler({
+    getPendingFiles: () => pendingFilesRef.current,
+    setPendingFilesFn: setPendingFiles,
+    revokePreviewFn: revokePendingPreview,
+    deleteUploadFn: deleteChatAttachmentUpload,
+  }), []);
 
   const clearDragState = useCallback(() => {
-    dragDepthRef.current = 0;
-    setDragActive(false);
+    clearMessageInputDragState({
+      dragDepthRef,
+      setDragActiveFn: setDragActive,
+    });
   }, []);
 
-  const handleDragEnter = useCallback((e) => {
-    if (!hasFileDrag(e.dataTransfer)) return;
-    e.preventDefault();
-    e.stopPropagation();
-    dragDepthRef.current += 1;
-    setDragActive(true);
-  }, []);
+  const dragHandlers = useMemo(() => createMessageInputDragHandlers({
+    getDragActive: () => dragActive,
+    dragDepthRef,
+    setDragActiveFn: setDragActive,
+    clearDragStateFn: clearDragState,
+    uploadPendingAttachmentsFn: uploadPendingAttachments,
+  }), [clearDragState, dragActive, uploadPendingAttachments]);
 
-  const handleDragOver = useCallback((e) => {
-    if (!hasFileDrag(e.dataTransfer)) return;
-    e.preventDefault();
-    e.stopPropagation();
-    e.dataTransfer.dropEffect = 'copy';
-    if (!dragActive) setDragActive(true);
-  }, [dragActive]);
-
-  const handleDragLeave = useCallback((e) => {
-    if (!hasFileDrag(e.dataTransfer)) return;
-    e.preventDefault();
-    e.stopPropagation();
-    dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
-    if (dragDepthRef.current === 0) {
-      setDragActive(false);
-    }
-  }, []);
-
-  const handleDrop = useCallback(async (e) => {
-    if (!hasFileDrag(e.dataTransfer)) return;
-    e.preventDefault();
-    e.stopPropagation();
-    const droppedFiles = Array.from(e.dataTransfer?.files || []);
-    clearDragState();
-    await uploadPendingAttachments(droppedFiles, 'Drop');
-  }, [clearDragState, uploadPendingAttachments]);
-
-  const active = (text.trim().length > 0 || pendingFiles.length > 0) && !uploading;
+  const active = getMessageInputActiveState({
+    text,
+    pendingFiles,
+    uploading,
+  });
 
   return (
     <div style={{
@@ -205,10 +157,10 @@ export default function MessageInput({ onSend, conversation }) {
       borderTop: '1px solid var(--border)',
       background: 'var(--bg-secondary)',
     }}
-      onDragEnter={handleDragEnter}
-      onDragOver={handleDragOver}
-      onDragLeave={handleDragLeave}
-      onDrop={handleDrop}
+      onDragEnter={dragHandlers.handleDragEnter}
+      onDragOver={dragHandlers.handleDragOver}
+      onDragLeave={dragHandlers.handleDragLeave}
+      onDrop={dragHandlers.handleDrop}
     >
       {dragActive && (
         <div style={{
@@ -307,11 +259,12 @@ export default function MessageInput({ onSend, conversation }) {
         <FileUploadButton onUploaded={handleFileUploaded} onError={setInputError} />
         <textarea
           ref={textareaRef}
+          data-primary-composer="chat"
           value={text}
           onChange={handleChange}
           onKeyDown={handleKeyDown}
           onPaste={handlePaste}
-          placeholder={uploading ? 'Uploading encrypted image...' : 'Type a message...'}
+          placeholder={getMessageInputPlaceholder({ uploading })}
           rows={1}
           style={{
             flex: 1,
@@ -327,6 +280,7 @@ export default function MessageInput({ onSend, conversation }) {
             maxHeight: 120,
             fontFamily: 'inherit',
             transition: 'border-color 0.2s',
+            caretColor: '#40FF40',
           }}
           onFocus={e => e.target.style.borderColor = 'rgba(64, 255, 64, 0.3)'}
           onBlur={e => e.target.style.borderColor = 'var(--border)'}
@@ -356,3 +310,9 @@ export default function MessageInput({ onSend, conversation }) {
     </div>
   );
 }
+
+export default memo(MessageInput, (prevProps, nextProps) => (
+  prevProps.onSend === nextProps.onSend
+  && prevProps.conversation?.id === nextProps.conversation?.id
+  && prevProps.conversation?.type === nextProps.conversation?.type
+));

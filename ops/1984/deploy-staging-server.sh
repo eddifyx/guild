@@ -3,8 +3,9 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SOURCE_DIR="$ROOT_DIR/server/"
-HOST="${GUILD_1984_HOST:-89.127.232.111}"
-USER="${GUILD_1984_USER:-root}"
+SSH_TARGET="${GUILD_1984_SSH_TARGET:-}"
+HOST="${GUILD_1984_HOST:-}"
+USER="${GUILD_1984_USER:-}"
 SSH_KEY="${GUILD_1984_SSH_KEY:-}"
 TARGET="${GUILD_1984_TARGET:-staging}"
 APPLY=0
@@ -42,12 +43,12 @@ done
 
 case "$TARGET" in
   staging)
-    REMOTE_DIR="/root/byzantine-staging"
-    PM2_NAME="byzantine-staging"
+    REMOTE_DIR="/opt/guild-staging/server"
+    SERVICE_NAME="guild-staging"
     ;;
   production)
-    REMOTE_DIR="/root/byzantine-server"
-    PM2_NAME="byzantine"
+    REMOTE_DIR="/opt/guild/server"
+    SERVICE_NAME="guild-server"
     ;;
   *)
     echo "Invalid target: $TARGET" >&2
@@ -55,42 +56,73 @@ case "$TARGET" in
     ;;
 esac
 
-SSH_OPTS=(-o StrictHostKeyChecking=no)
+if [[ -n "$SSH_TARGET" ]]; then
+  REMOTE="$SSH_TARGET"
+elif [[ -n "$HOST" && -n "$USER" ]]; then
+  REMOTE="$USER@$HOST"
+elif [[ -n "$HOST" ]]; then
+  REMOTE="$HOST"
+else
+  REMOTE="flokinet-guild"
+fi
+
+SSH_OPTS=(-o StrictHostKeyChecking=accept-new)
 if [[ -n "$SSH_KEY" ]]; then
   SSH_OPTS+=(-i "$SSH_KEY")
 fi
 
-RSYNC_ARGS=(
-  -az
-  --delete
-  --exclude data/
-  --exclude uploads/
-  --exclude updates/
-  --exclude node_modules/
-  --exclude .DS_Store
-)
-
 if [[ "$APPLY" -eq 0 ]]; then
-  RSYNC_ARGS+=(--dry-run --itemize-changes)
-  echo "[dry-run] Syncing $SOURCE_DIR to $USER@$HOST:$REMOTE_DIR"
+  echo "[dry-run] Would sync $SOURCE_DIR to $REMOTE:$REMOTE_DIR via a staged rsync + sudo install flow"
+  echo "[dry-run] Would restart service: $SERVICE_NAME"
 else
-  echo "[apply] Syncing $SOURCE_DIR to $USER@$HOST:$REMOTE_DIR"
+  echo "[apply] Syncing $SOURCE_DIR to $REMOTE:$REMOTE_DIR"
 fi
-
-rsync "${RSYNC_ARGS[@]}" -e "ssh ${SSH_OPTS[*]}" "$SOURCE_DIR" "$USER@$HOST:$REMOTE_DIR/"
 
 if [[ "$APPLY" -eq 0 ]]; then
   echo "[dry-run] No remote install or restart performed."
   exit 0
 fi
 
-ssh "${SSH_OPTS[@]}" "$USER@$HOST" "
-  set -euo pipefail
-  cd '$REMOTE_DIR'
-  npm install --omit=dev
-  node scripts/ensureBetterSqlite3.js
-  pm2 restart '$PM2_NAME'
-  pm2 save
-"
+REMOTE_STAGE_DIR="$(
+  ssh "${SSH_OPTS[@]}" "$REMOTE" "mktemp -d /tmp/guild-server-sync.XXXXXX"
+)"
 
-echo "[apply] $PM2_NAME refreshed on $HOST"
+cleanup_remote_stage() {
+  ssh "${SSH_OPTS[@]}" "$REMOTE" "rm -rf '$REMOTE_STAGE_DIR'" >/dev/null 2>&1 || true
+}
+trap cleanup_remote_stage EXIT
+
+rsync -az \
+  --delete \
+  --exclude data/ \
+  --exclude uploads/ \
+  --exclude updates/ \
+  --exclude node_modules/ \
+  --exclude .DS_Store \
+  -e "ssh ${SSH_OPTS[*]}" \
+  "$SOURCE_DIR" "$REMOTE:$REMOTE_STAGE_DIR/"
+
+ssh "${SSH_OPTS[@]}" "$REMOTE" bash -s -- "$REMOTE_STAGE_DIR/server" "$REMOTE_DIR" "$SERVICE_NAME" <<'EOF'
+set -euo pipefail
+
+stage_dir="$1"
+remote_dir="$2"
+service_name="$3"
+
+sudo rsync -az \
+  --delete \
+  --exclude data/ \
+  --exclude uploads/ \
+  --exclude updates/ \
+  --exclude node_modules/ \
+  --exclude .DS_Store \
+  "$stage_dir/" "$remote_dir/"
+
+cd "$remote_dir"
+sudo npm install --omit=dev
+sudo node scripts/ensureBetterSqlite3.js
+sudo systemctl restart "$service_name"
+sudo systemctl is-active "$service_name"
+EOF
+
+echo "[apply] $SERVICE_NAME refreshed on $REMOTE"

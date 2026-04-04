@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import Modal from '../Common/Modal';
 
 export default function CreateVoiceChannelModal({ onClose, onCreate }) {
@@ -37,6 +37,7 @@ export default function CreateVoiceChannelModal({ onClose, onCreate }) {
           value={name}
           onChange={e => { setName(e.target.value); setError(''); }}
           placeholder="Channel name"
+          maxLength={100}
           style={{
             width: '100%',
             padding: '10px 12px',

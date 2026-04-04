@@ -1,11 +1,12 @@
-import { useState, useEffect } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useGuilds } from '../../hooks/useGuilds';
 import { useGuild } from '../../contexts/GuildContext';
-import { getFileUrl } from '../../api';
+import { JoinGuildBrowsePanel } from './JoinGuildBrowsePanel.jsx';
+import { JoinGuildInvitePanel } from './JoinGuildInvitePanel.jsx';
 
 export default function JoinGuildModal({ onClose, onJoined }) {
   const { publicGuilds, fetchPublicGuilds, joinGuild, joinByInviteCode } = useGuilds();
-  const { myGuild } = useGuild();
+  const { myGuild, fetchMyGuild } = useGuild();
   const [inviteCode, setInviteCode] = useState('');
   const [error, setError] = useState('');
   const [joining, setJoining] = useState(false);
@@ -15,8 +16,7 @@ export default function JoinGuildModal({ onClose, onJoined }) {
     fetchPublicGuilds();
   }, [fetchPublicGuilds]);
 
-  // Filter out current guild from browse list
-  const available = publicGuilds.filter(g => g.id !== myGuild?.id);
+  const available = publicGuilds.filter((guild) => guild.id !== myGuild?.id);
 
   const handleJoinPublic = async (guildId) => {
     setJoining(true);
@@ -25,14 +25,19 @@ export default function JoinGuildModal({ onClose, onJoined }) {
       await joinGuild(guildId);
       onJoined(guildId);
     } catch (err) {
+      if (/already a member/i.test(err?.message || '')) {
+        await fetchMyGuild();
+        onJoined(guildId);
+        return;
+      }
       setError(err.message);
     } finally {
       setJoining(false);
     }
   };
 
-  const handleJoinByCode = async (e) => {
-    e.preventDefault();
+  const handleJoinByCode = async (event) => {
+    event.preventDefault();
     if (!inviteCode.trim()) return;
 
     setJoining(true);
@@ -41,6 +46,11 @@ export default function JoinGuildModal({ onClose, onJoined }) {
       const result = await joinByInviteCode(inviteCode.trim());
       onJoined(result.guildId);
     } catch (err) {
+      if (/already a member/i.test(err?.message || '')) {
+        await fetchMyGuild();
+        onClose?.();
+        return;
+      }
       setError(err.message);
     } finally {
       setJoining(false);
@@ -49,7 +59,7 @@ export default function JoinGuildModal({ onClose, onJoined }) {
 
   return (
     <div style={styles.overlay} onClick={onClose}>
-      <div style={styles.modal} onClick={e => e.stopPropagation()}>
+      <div style={styles.modal} onClick={(event) => event.stopPropagation()}>
         <h2 style={styles.title}>Join Guild</h2>
 
         {myGuild && (
@@ -75,53 +85,21 @@ export default function JoinGuildModal({ onClose, onJoined }) {
 
         {error && <div style={styles.error}>{error}</div>}
 
-        {tab === 'browse' && (
-          <div style={styles.list}>
-            {available.length === 0 ? (
-              <p style={styles.empty}>No public guilds available to join</p>
-            ) : (
-              available.map(guild => (
-                <div key={guild.id} style={styles.listItem}>
-                  <div style={styles.listIcon}>
-                    {guild.image_url ? (
-                      <img src={getFileUrl(guild.image_url)} alt="" style={styles.listImage} />
-                    ) : (
-                      <span style={styles.listInitial}>{guild.name[0]?.toUpperCase()}</span>
-                    )}
-                  </div>
-                  <div style={styles.listInfo}>
-                    <span style={styles.listName}>{guild.name}</span>
-                    <span style={styles.listMeta}>
-                      {guild.memberCount} member{guild.memberCount !== 1 ? 's' : ''}
-                    </span>
-                  </div>
-                  <button
-                    onClick={() => handleJoinPublic(guild.id)}
-                    disabled={joining}
-                    style={styles.joinBtn}
-                  >
-                    Join
-                  </button>
-                </div>
-              ))
-            )}
-          </div>
-        )}
-
-        {tab === 'invite' && (
-          <form onSubmit={handleJoinByCode} style={styles.inviteForm}>
-            <input
-              type="text"
-              value={inviteCode}
-              onChange={e => setInviteCode(e.target.value)}
-              placeholder="Paste invite code..."
-              style={styles.input}
-              autoFocus
-            />
-            <button type="submit" disabled={!inviteCode.trim() || joining} style={styles.submitBtn}>
-              {joining ? 'Joining...' : 'Join'}
-            </button>
-          </form>
+        {tab === 'browse' ? (
+          <JoinGuildBrowsePanel
+            availableGuilds={available}
+            joining={joining}
+            onJoinPublic={handleJoinPublic}
+            styles={styles}
+          />
+        ) : (
+          <JoinGuildInvitePanel
+            inviteCode={inviteCode}
+            joining={joining}
+            onJoinByCode={handleJoinByCode}
+            onInviteCodeChange={setInviteCode}
+            styles={styles}
+          />
         )}
 
         <div style={styles.footer}>

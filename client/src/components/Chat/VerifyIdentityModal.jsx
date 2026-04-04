@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import React, { useState, useEffect } from 'react';
 import { getSafetyNumberForUser } from '../../crypto/fingerprint';
 import { loadRemoteIdentityVerification, markIdentityVerified } from '../../crypto/signalClient';
 import { isE2EInitialized } from '../../crypto/sessionManager';

@@ -1,4 +1,4 @@
-import { memo, useState, useEffect, useRef } from 'react';
+import React, { memo, useState, useEffect, useRef } from 'react';
 import Avatar from '../Common/Avatar';
 import OnlineBadge from '../Common/OnlineBadge';
 
@@ -64,7 +64,12 @@ function DMList({ conversations, activeId, onSelect, onRemove, onlineIds, unread
             }}
           >
             <div style={{ position: 'relative' }}>
-              <Avatar username={conv.other_username} color={conv.other_avatar_color} size={24} />
+              <Avatar
+                username={conv.other_username}
+                color={conv.other_avatar_color}
+                size={24}
+                profilePicture={conv.other_profile_picture}
+              />
               <OnlineBadge online={onlineIds.has(conv.other_user_id)} size={7} />
             </div>
             <span className="truncate" style={{ flex: 1 }}>{conv.other_username}</span>

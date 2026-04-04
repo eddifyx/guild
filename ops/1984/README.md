@@ -17,14 +17,15 @@ voice usage grows.
 
 The existing 1984 VPS is already running a split deployment:
 
-- production app: `/root/byzantine-server`
-- staging app: `/root/byzantine-staging`
-- PM2 process name: `byzantine` on port `3001`
-- PM2 process name: `byzantine-staging` on port `3002`
+- production app: `/opt/guild`
+- staging app: `/opt/guild-staging`
+- production metadata: `/opt/guild/server/client-version.json`
+- staging metadata: `/opt/guild-staging/server/client-version.json`
+- SSH path from this repo: `flokinet-guild` from local `~/.ssh/config`
 
 This means the safest path is:
 
-1. stage server code into `/root/byzantine-staging`
+1. stage server code into `/opt/guild-staging/server`
 2. test there first
 3. publish version metadata and update ZIPs only when you are ready
 
@@ -227,13 +228,16 @@ For this specific VPS, use the scripts in this folder instead of the generic
 `/opt/guild` runbook:
 
 - `deploy-staging-server.sh`
-  - syncs the local `server/` directory into `/root/byzantine-staging`
+  - syncs the local `server/` directory into `/opt/guild/server` or `/opt/guild-staging/server`
   - preserves `data/`, `uploads/`, and `updates/`
   - runs the native module sanity script
-  - restarts only the staging PM2 process
+  - restarts the matching `systemd` service
 - `publish-update-artifacts.sh`
-  - copies release ZIPs into the target `updates/` directory
-  - updates `client-version.json`
+  - stages release ZIPs plus the full `client-version.json` manifest
+  - requires a validated release proof JSON on `--apply`
+  - backs up the live manifest before install
+  - archives the release proof under `release-proofs/`
+  - installs artifacts and metadata with `sudo` into `/opt/guild/server` or `/opt/guild-staging/server`
   - should be used only when you are ready to expose the new app update
 
 Both scripts default to a dry-run. Use `--apply` to make changes.

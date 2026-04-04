@@ -1,0 +1,77 @@
+export function buildAudioSettingsControllerStartTestAction({
+  outputDevices = [],
+  refs = {},
+  state = {},
+  deps = {},
+  coreActions = {},
+  startAppleVoiceIsolationTest,
+} = {}) {
+  const {
+    streamRef,
+    audioCtxRef,
+    animFrameRef,
+    gainRef,
+    noiseSuppressorNodeRef,
+    residualDenoiserNodeRef,
+    noiseGateNodeRef,
+    speechFocusChainRef,
+    keyboardSuppressorNodeRef,
+    noiseSuppressionRoutingRef,
+    appleVoiceAvailableRef,
+    testRunIdRef,
+    selectedInputRef,
+    selectedOutputRef,
+    processingModeRef,
+    noiseSuppressionRef,
+  } = refs;
+  const {
+    setTestingFn,
+    setTestStartingFn,
+    setTestDiagnosticsFn,
+  } = state;
+  const {
+    updateMicMeter,
+    applyNoiseSuppressionRouting,
+    clearPreviewPlayback,
+    attachMonitorOutput,
+  } = coreActions;
+
+  return deps.createAudioSettingsStartTestHandlerFn(
+    deps.buildAudioSettingsMicTestStartContractFn({
+      refs: {
+        processingModeRef,
+        selectedInputRef,
+        selectedOutputRef,
+        noiseSuppressionRef,
+        appleVoiceAvailableRef,
+        testRunIdRef,
+        streamRef,
+        audioCtxRef,
+        gainRef,
+        noiseSuppressionRoutingRef,
+        animFrameRef,
+        noiseSuppressorNodeRef,
+        residualDenoiserNodeRef,
+        noiseGateNodeRef,
+        speechFocusChainRef,
+        keyboardSuppressorNodeRef,
+      },
+      outputDevices,
+      setTestStartingFn,
+      setTestingFn,
+      setTestDiagnosticsFn,
+      clearPreviewPlaybackFn: clearPreviewPlayback,
+      attachMonitorOutputFn: attachMonitorOutput,
+      updateMicMeterFn: updateMicMeter,
+      applyNoiseSuppressionRoutingFn: applyNoiseSuppressionRouting,
+      startAppleVoiceIsolationTestFn: startAppleVoiceIsolationTest,
+      createRnnoiseNodeFn: deps.createRnnoiseNodeFn,
+      createSpeexNodeFn: deps.createSpeexNodeFn,
+      createNoiseGateNodeFn: deps.createNoiseGateNodeFn,
+      createSpeechFocusChainFn: deps.createSpeechFocusChainFn,
+      createKeyboardSuppressorNodeFn: deps.createKeyboardSuppressorNodeFn,
+      shouldDisableAppleVoiceForSessionFn: deps.shouldDisableAppleVoiceForSessionFn,
+      getFriendlyAppleVoiceFallbackMessageFn: deps.getFriendlyAppleVoiceFallbackMessageFn,
+    }),
+  );
+}

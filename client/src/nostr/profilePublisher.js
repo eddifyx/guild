@@ -9,8 +9,35 @@
 import { getEventHash } from 'nostr-tools';
 import { createWrap } from 'nostr-tools/nip59';
 import { SimplePool } from 'nostr-tools/pool';
-import { getLoginMode, getSigner, getUserPubkey } from '../utils/nostrConnect';
-import { fetchProfile } from '../utils/nostr';
+import {
+  getLoginMode,
+  getSigner,
+  getUserPubkey,
+  reconnect,
+  waitForNip46RelayCooldown,
+} from '../utils/nostrConnect.js';
+import { fetchProfile } from '../utils/nostr.js';
+import {
+  buildGiftWrapUnavailableMessage,
+  buildNoteEventTemplate,
+  buildProfileEventTemplate,
+  bytesToHex,
+  describeSignerError,
+  isMissingNip04Capability,
+  toBase64Url,
+} from '../features/nostr/profilePublisherModel.mjs';
+import {
+  fetchRelayProfile,
+  parseBlossomErrorResponse,
+  publishEventToRelays,
+  publishSignedEvent,
+  signBlossomAuthHeader,
+} from '../features/nostr/profilePublisherRuntime.mjs';
+import {
+  preparePublisherSignerRequest,
+  requestPublisherSignature,
+  resolvePublisherSignerSession,
+} from '../features/nostr/profilePublisherSessionRuntime.mjs';
 
 const PUBLISH_RELAYS = [
   'wss://relay.damus.io',
@@ -20,34 +47,81 @@ const PUBLISH_RELAYS = [
 ];
 const BLOSSOM_SERVER = 'https://blossom.nostr.build';
 
-function bytesToHex(buffer) {
-  return Array.from(new Uint8Array(buffer), (byte) => byte.toString(16).padStart(2, '0')).join('');
-}
-
-function describeSignerError(err, fallback = 'Unknown signer error') {
-  if (typeof err === 'string' && err.trim()) return err;
-  if (err instanceof Error && err.message) return err.message;
-  if (err && typeof err === 'object') {
-    if (typeof err.message === 'string' && err.message.trim()) return err.message;
-    if (typeof err.error === 'string' && err.error.trim()) return err.error;
-    if (typeof err.reason === 'string' && err.reason.trim()) return err.reason;
-    try {
-      const serialized = JSON.stringify(err);
-      if (serialized && serialized !== '{}') return serialized;
-    } catch {}
+async function refreshPublisherSigner({
+  reconnectSignerFn = reconnect,
+  getSignerFn = getSigner,
+  getUserPubkeyFn = getUserPubkey,
+} = {}) {
+  const restored = await Promise.resolve(reconnectSignerFn?.()).catch(() => false);
+  if (!restored) {
+    return { signer: null, pubkey: null };
   }
-  return fallback;
+
+  return {
+    signer: getSignerFn?.() || null,
+    pubkey: getUserPubkeyFn?.() || null,
+  };
 }
 
-function isMissingNip04Capability(errorText = '') {
-  const normalized = String(errorText || '').toLowerCase();
-  return normalized.includes('no nip04_encrypt_method')
-    || normalized.includes('nip04')
-    || normalized.includes('unsupported method');
-}
+async function ensurePublisherSignerReady({
+  signer = null,
+  loginMode = null,
+  reconnectSignerFn = reconnect,
+  getSignerFn = getSigner,
+  getUserPubkeyFn = getUserPubkey,
+  waitForNip46RelayCooldownFn = waitForNip46RelayCooldown,
+  preparePublisherSignerRequestFn = preparePublisherSignerRequest,
+  pingTimeoutMessage = 'Your signer connected, but it did not answer a profile publish readiness check in time.',
+  forceSessionRefresh = false,
+} = {}) {
+  let activeSigner = signer;
+  let activePubkey = getUserPubkeyFn?.() || null;
 
-async function publishEvent(pool, event) {
-  await Promise.any(pool.publish(PUBLISH_RELAYS, event));
+  if (loginMode === 'nip46' && forceSessionRefresh) {
+    const refreshed = await refreshPublisherSigner({
+      reconnectSignerFn,
+      getSignerFn,
+      getUserPubkeyFn,
+    });
+    if (refreshed.signer && refreshed.pubkey) {
+      activeSigner = refreshed.signer;
+      activePubkey = refreshed.pubkey;
+    }
+  }
+
+  const runPrepare = async () => {
+    await preparePublisherSignerRequestFn({
+      signer: activeSigner,
+      loginMode,
+      waitForNip46RelayCooldownFn,
+      pingTimeoutMessage,
+      ignorePingFailure: false,
+    });
+  };
+
+  try {
+    await runPrepare();
+    return { signer: activeSigner, pubkey: activePubkey };
+  } catch (error) {
+    if (loginMode !== 'nip46') {
+      throw error;
+    }
+
+    const refreshed = await refreshPublisherSigner({
+      reconnectSignerFn,
+      getSignerFn,
+      getUserPubkeyFn,
+    });
+    activeSigner = refreshed.signer;
+    activePubkey = refreshed.pubkey;
+
+    if (!activeSigner || !activePubkey) {
+      throw error;
+    }
+
+    await runPrepare();
+    return { signer: activeSigner, pubkey: activePubkey };
+  }
 }
 
 async function publishLegacyDM({ signer, recipientPubkeyHex, content }) {
@@ -62,7 +136,7 @@ async function publishLegacyDM({ signer, recipientPubkeyHex, content }) {
 
   const pool = new SimplePool();
   try {
-    await publishEvent(pool, signedEvent);
+    await publishEventToRelays({ pool, relays: PUBLISH_RELAYS, event: signedEvent });
     return { ok: true };
   } finally {
     pool.close(PUBLISH_RELAYS);
@@ -98,7 +172,7 @@ async function publishGiftWrappedDM({ signer, senderPubkeyHex, recipientPubkeyHe
 
   const pool = new SimplePool();
   try {
-    await publishEvent(pool, recipientWrap);
+    await publishEventToRelays({ pool, relays: PUBLISH_RELAYS, event: recipientWrap });
 
     if (senderPubkeyHex && senderPubkeyHex !== recipientPubkeyHex) {
       try {
@@ -109,7 +183,11 @@ async function publishGiftWrappedDM({ signer, senderPubkeyHex, recipientPubkeyHe
           content: await signer.nip44Encrypt(senderPubkeyHex, JSON.stringify(rumor)),
         });
 
-        await publishEvent(pool, createWrap(sealForSender, senderPubkeyHex));
+        await publishEventToRelays({
+          pool,
+          relays: PUBLISH_RELAYS,
+          event: createWrap(sealForSender, senderPubkeyHex),
+        });
       } catch {
         // Sender copy is best-effort; recipient delivery is the important part.
       }
@@ -121,59 +199,6 @@ async function publishGiftWrappedDM({ signer, senderPubkeyHex, recipientPubkeyHe
   }
 }
 
-function toBase64Url(value) {
-  const bytes = new TextEncoder().encode(value);
-  let binary = '';
-  const chunkSize = 0x8000;
-
-  for (let index = 0; index < bytes.length; index += chunkSize) {
-    const chunk = bytes.subarray(index, index + chunkSize);
-    binary += String.fromCharCode(...chunk);
-  }
-
-  return btoa(binary)
-    .replace(/\+/g, '-')
-    .replace(/\//g, '_')
-    .replace(/=+$/g, '');
-}
-
-async function signBlossomAuthEvent({ action, sha256, content }) {
-  const signer = getSigner();
-  const pubkey = getUserPubkey();
-  if (!signer || !pubkey) {
-    throw new Error('Signer not available — please re-login');
-  }
-
-  const expiresAt = Math.floor(Date.now() / 1000) + (5 * 60);
-  const signedEvent = await signer.signEvent({
-    kind: 24242,
-    created_at: Math.floor(Date.now() / 1000),
-    tags: [
-      ['t', action],
-      ['x', sha256],
-      ['expiration', String(expiresAt)],
-      ['server', 'blossom.nostr.build'],
-    ],
-    content,
-  });
-
-  return `Nostr ${toBase64Url(JSON.stringify(signedEvent))}`;
-}
-
-async function parseBlossomError(res) {
-  const text = await res.text().catch(() => '');
-  if (!text) {
-    return `Upload failed (${res.status})`;
-  }
-
-  try {
-    const data = JSON.parse(text);
-    return data.error || data.message || text;
-  } catch {
-    return text;
-  }
-}
-
 /**
  * Fetch the user's existing kind:0 profile from relays.
  * Returns the full profile content object or null.
@@ -181,21 +206,11 @@ async function parseBlossomError(res) {
  */
 export async function fetchCurrentProfile(fallbackPubkey) {
   const pubkey = getUserPubkey() || fallbackPubkey;
-  if (!pubkey) return null;
-
-  const pool = new SimplePool();
-  try {
-    const event = await pool.get(PUBLISH_RELAYS, {
-      kinds: [0],
-      authors: [pubkey],
-    });
-    if (!event) return null;
-    return JSON.parse(event.content);
-  } catch {
-    return null;
-  } finally {
-    pool.close(PUBLISH_RELAYS);
-  }
+  return fetchRelayProfile({
+    poolCtor: SimplePool,
+    relays: PUBLISH_RELAYS,
+    pubkey,
+  });
 }
 
 /**
@@ -204,49 +219,109 @@ export async function fetchCurrentProfile(fallbackPubkey) {
  * @param {object} profile — { name, about, picture, banner, lud16 }
  * @returns {Promise<{ ok: boolean, error?: string }>}
  */
-export async function publishProfile(profile) {
-  const signer = getSigner();
-  const pubkey = getUserPubkey();
+export async function publishProfile(profile, {
+  getSignerFn = getSigner,
+  getUserPubkeyFn = getUserPubkey,
+  getLoginModeFn = getLoginMode,
+  reconnectSignerFn = reconnect,
+  waitForNip46RelayCooldownFn = waitForNip46RelayCooldown,
+  publishSignedEventFn = publishSignedEvent,
+  poolCtor = SimplePool,
+  resolvePublisherSignerSessionFn = resolvePublisherSignerSession,
+  preparePublisherSignerRequestFn = preparePublisherSignerRequest,
+  requestPublisherSignatureFn = requestPublisherSignature,
+} = {}) {
+  const { signer, pubkey, error: sessionError } = await resolvePublisherSignerSessionFn({
+    getSignerFn,
+    getUserPubkeyFn,
+    reconnectSignerFn,
+  });
   if (!signer || !pubkey) {
-    return { ok: false, error: 'Signer not available — please re-login' };
+    return {
+      ok: false,
+      error: sessionError?.message || 'Signer unavailable — reconnect your signer to continue',
+    };
+  }
+  const loginMode = getLoginModeFn();
+  let activeSigner = signer;
+  let activePubkey = pubkey;
+
+  try {
+    const readySession = await ensurePublisherSignerReady({
+      signer: activeSigner,
+      loginMode,
+      reconnectSignerFn,
+      getSignerFn,
+      getUserPubkeyFn,
+      waitForNip46RelayCooldownFn,
+      preparePublisherSignerRequestFn,
+      pingTimeoutMessage: 'Your signer connected, but it did not answer a profile publish readiness check in time.',
+      forceSessionRefresh: loginMode === 'nip46',
+    });
+    activeSigner = readySession.signer;
+    activePubkey = readySession.pubkey || activePubkey;
+  } catch (error) {
+    return {
+      ok: false,
+      error: error?.message || 'Signer unavailable — reconnect your signer to continue',
+    };
   }
 
-  // Build kind:0 content
-  const content = JSON.stringify({
-    name: (profile.name || '').slice(0, 50),
-    about: (profile.about || '').slice(0, 250),
-    picture: profile.picture || '',
-    banner: profile.banner || '',
-    lud16: profile.lud16 || '',
-  });
-
-  // Build unsigned event
-  const eventTemplate = {
-    kind: 0,
-    created_at: Math.floor(Date.now() / 1000),
-    tags: [],
-    content,
-  };
+  const eventTemplate = buildProfileEventTemplate(profile, Date.now(), activePubkey);
 
   // Sign the event
   let signedEvent;
   try {
-    signedEvent = await signer.signEvent(eventTemplate);
+    signedEvent = await requestPublisherSignatureFn({
+      signer: activeSigner,
+      eventTemplate,
+      timeoutMessage: 'Your signer connected, but it did not approve the profile publish request in time.',
+    });
   } catch (err) {
-    return { ok: false, error: 'Failed to sign event: ' + err.message };
+    if (loginMode !== 'nip46') {
+      return { ok: false, error: 'Failed to sign event: ' + err.message };
+    }
+
+    const refreshed = await refreshPublisherSigner({
+      reconnectSignerFn,
+      getSignerFn,
+      getUserPubkeyFn,
+    });
+    if (!refreshed.signer || !refreshed.pubkey) {
+      return { ok: false, error: 'Failed to sign event: ' + err.message };
+    }
+
+    try {
+      const readySession = await ensurePublisherSignerReady({
+        signer: refreshed.signer,
+        loginMode,
+        reconnectSignerFn,
+        getSignerFn,
+        getUserPubkeyFn,
+        waitForNip46RelayCooldownFn,
+        preparePublisherSignerRequestFn,
+        pingTimeoutMessage: 'Your signer connected, but it did not answer a profile publish readiness check in time.',
+        forceSessionRefresh: false,
+      });
+      signedEvent = await requestPublisherSignatureFn({
+        signer: readySession.signer,
+        eventTemplate: buildProfileEventTemplate(profile, Date.now(), readySession.pubkey || refreshed.pubkey || activePubkey),
+        timeoutMessage: 'Your signer connected, but it did not approve the profile publish request in time.',
+      });
+    } catch (retryError) {
+      return { ok: false, error: 'Failed to sign event: ' + retryError.message };
+    }
   }
 
   // Publish to relays
-  const pool = new SimplePool();
   try {
-    await Promise.any(
-      pool.publish(PUBLISH_RELAYS, signedEvent)
-    );
-    return { ok: true };
+    return await publishSignedEventFn({
+      poolCtor,
+      relays: PUBLISH_RELAYS,
+      event: signedEvent,
+    });
   } catch (err) {
     return { ok: false, error: 'Failed to publish to relays' };
-  } finally {
-    pool.close(PUBLISH_RELAYS);
   }
 }
 
@@ -256,37 +331,75 @@ export async function publishProfile(profile) {
  * @param {string} content — the note text
  * @returns {Promise<{ ok: boolean, error?: string }>}
  */
-export async function publishNote(content) {
-  const signer = getSigner();
-  const pubkey = getUserPubkey();
+export async function publishNote(content, {
+  getSignerFn = getSigner,
+  getUserPubkeyFn = getUserPubkey,
+  getLoginModeFn = getLoginMode,
+  reconnectSignerFn = reconnect,
+  waitForNip46RelayCooldownFn = waitForNip46RelayCooldown,
+  publishSignedEventFn = publishSignedEvent,
+  poolCtor = SimplePool,
+  resolvePublisherSignerSessionFn = resolvePublisherSignerSession,
+  preparePublisherSignerRequestFn = preparePublisherSignerRequest,
+  requestPublisherSignatureFn = requestPublisherSignature,
+} = {}) {
+  const { signer, pubkey, error: sessionError } = await resolvePublisherSignerSessionFn({
+    getSignerFn,
+    getUserPubkeyFn,
+    reconnectSignerFn,
+  });
   if (!signer || !pubkey) {
-    return { ok: false, error: 'Signer not available — please re-login' };
+    return {
+      ok: false,
+      error: sessionError?.message || 'Signer unavailable — reconnect your signer to continue',
+    };
   }
 
-  const eventTemplate = {
-    kind: 1,
-    created_at: Math.floor(Date.now() / 1000),
-    tags: [],
-    content: content.slice(0, 1000),
-  };
+  const loginMode = getLoginModeFn();
+  let activeSigner = signer;
+  let activePubkey = pubkey;
+
+  try {
+    const readySession = await ensurePublisherSignerReady({
+      signer: activeSigner,
+      loginMode,
+      reconnectSignerFn,
+      getSignerFn,
+      getUserPubkeyFn,
+      waitForNip46RelayCooldownFn,
+      preparePublisherSignerRequestFn,
+      pingTimeoutMessage: 'Your signer connected, but it did not answer a note publish readiness check in time.',
+    });
+    activeSigner = readySession.signer;
+    activePubkey = readySession.pubkey || activePubkey;
+  } catch (error) {
+    return {
+      ok: false,
+      error: error?.message || 'Signer unavailable — reconnect your signer to continue',
+    };
+  }
+
+  const eventTemplate = buildNoteEventTemplate(content, Date.now(), activePubkey);
 
   let signedEvent;
   try {
-    signedEvent = await signer.signEvent(eventTemplate);
+    signedEvent = await requestPublisherSignatureFn({
+      signer: activeSigner,
+      eventTemplate,
+      timeoutMessage: 'Your signer connected, but it did not approve the note publish request in time.',
+    });
   } catch (err) {
     return { ok: false, error: 'Failed to sign: ' + err.message };
   }
 
-  const pool = new SimplePool();
   try {
-    await Promise.any(
-      pool.publish(PUBLISH_RELAYS, signedEvent)
-    );
-    return { ok: true };
+    return await publishSignedEventFn({
+      poolCtor,
+      relays: PUBLISH_RELAYS,
+      event: signedEvent,
+    });
   } catch {
     return { ok: false, error: 'Failed to publish to relays' };
-  } finally {
-    pool.close(PUBLISH_RELAYS);
   }
 }
 
@@ -297,11 +410,18 @@ export async function publishNote(content) {
  * @param {string} content — plaintext message
  * @returns {Promise<{ ok: boolean, error?: string }>}
  */
-export async function publishDM(recipientPubkeyHex, content) {
-  const signer = getSigner();
-  const pubkey = getUserPubkey();
+export async function publishDM(recipientPubkeyHex, content, {
+  getSignerFn = getSigner,
+  getUserPubkeyFn = getUserPubkey,
+  reconnectSignerFn = reconnect,
+} = {}) {
+  const { signer, pubkey } = await resolvePublisherSignerSession({
+    getSignerFn,
+    getUserPubkeyFn,
+    reconnectSignerFn,
+  });
   if (!signer || !pubkey) {
-    return { ok: false, error: 'Signer not available — please re-login' };
+    return { ok: false, error: 'Signer unavailable — reconnect your signer to continue' };
   }
 
   let legacyError = null;
@@ -334,15 +454,12 @@ export async function publishDM(recipientPubkeyHex, content) {
     });
   } catch (err) {
     const giftWrapError = describeSignerError(err, 'modern DM delivery failed');
-    if (getLoginMode() === 'nip46') {
-      return {
-        ok: false,
-        error: `This signer session cannot send encrypted Nostr DMs yet (${giftWrapError}). Reconnect your signer and approve modern DM permissions, or use the invite code tab.`,
-      };
-    }
     return {
       ok: false,
-      error: `Encrypted Nostr DMs are unavailable in this signer session (${giftWrapError}). Use the invite code tab instead.`,
+      error: buildGiftWrapUnavailableMessage({
+        loginMode: getLoginMode(),
+        giftWrapError,
+      }),
     };
   }
 }
@@ -353,12 +470,42 @@ export async function publishDM(recipientPubkeyHex, content) {
  * @param {File} file — image file
  * @returns {Promise<string>} — URL of the uploaded image
  */
-export async function uploadImage(file) {
+export async function uploadImage(file, {
+  getSignerFn = getSigner,
+  getUserPubkeyFn = getUserPubkey,
+  getLoginModeFn = getLoginMode,
+  reconnectSignerFn = reconnect,
+  waitForNip46RelayCooldownFn = waitForNip46RelayCooldown,
+  preparePublisherSignerRequestFn = preparePublisherSignerRequest,
+} = {}) {
+  const { signer, pubkey } = await resolvePublisherSignerSession({
+    getSignerFn,
+    getUserPubkeyFn,
+    reconnectSignerFn,
+  });
+  if (!signer || !pubkey) {
+    throw new Error('Signer unavailable — reconnect your signer to continue');
+  }
+
+  const readySession = await ensurePublisherSignerReady({
+    signer,
+    loginMode: getLoginModeFn(),
+    reconnectSignerFn,
+    getSignerFn,
+    getUserPubkeyFn,
+    waitForNip46RelayCooldownFn,
+    preparePublisherSignerRequestFn,
+    pingTimeoutMessage: 'Your signer connected, but it did not answer a profile image upload readiness check in time.',
+  });
+
   const sha256 = bytesToHex(await crypto.subtle.digest('SHA-256', await file.arrayBuffer()));
-  const authorization = await signBlossomAuthEvent({
+  const authorization = await signBlossomAuthHeader({
+    signer: readySession.signer,
+    pubkey: readySession.pubkey,
     action: 'media',
     sha256,
     content: 'Upload profile image',
+    encodeTokenFn: toBase64Url,
   });
 
   const res = await fetch(`${BLOSSOM_SERVER}/media`, {
@@ -372,7 +519,7 @@ export async function uploadImage(file) {
   });
 
   if (!res.ok) {
-    throw new Error(await parseBlossomError(res));
+    throw new Error(await parseBlossomErrorResponse(res));
   }
 
   const descriptor = await res.json().catch(() => null);

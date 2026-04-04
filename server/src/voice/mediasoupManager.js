@@ -1,132 +1,150 @@
 const mediasoup = require('mediasoup');
-const os = require('os');
+const {
+  buildRouterMediaCodecs,
+  buildWebRtcTransportOptions,
+  buildWorkerSettings,
+  resolveAnnouncedIp,
+  resolveTargetWorkerCount,
+} = require('../domain/voice/voiceConfig');
+const {
+  getTransportById,
+} = require('../domain/voice/voiceTransportState');
+const {
+  dropVoiceRoomReference,
+  getOrCreateVoiceRoom,
+  listVoicePeerProducers,
+  listVoiceRoomPeers,
+  removeVoicePeer,
+  removeVoiceRoom,
+} = require('../domain/voice/voiceRoomRuntime');
+const {
+  buildVoiceRoomStatsSnapshot,
+} = require('../domain/voice/voiceRoomStatsSnapshot');
+const {
+  prepareVoiceTransportRegistration,
+} = require('../domain/voice/voiceTransportRuntime');
+const {
+  createVoiceTransportMediaRuntime,
+} = require('../domain/voice/voiceTransportMediaRuntime');
+const {
+  attachVoiceWorkerLifecycle,
+  getNextVoiceWorker,
+  refillVoiceWorkers,
+  scheduleVoiceWorkerRefill,
+} = require('../domain/voice/voiceWorkerRuntime');
 
-const RTC_MIN_PORT = Number(process.env.MEDIASOUP_RTC_MIN_PORT || 10000);
-const RTC_MAX_PORT = Number(process.env.MEDIASOUP_RTC_MAX_PORT || 10100);
-
-if (!Number.isInteger(RTC_MIN_PORT) || !Number.isInteger(RTC_MAX_PORT) || RTC_MIN_PORT <= 0 || RTC_MAX_PORT < RTC_MIN_PORT) {
-  throw new Error(`Invalid mediasoup RTP port range: ${RTC_MIN_PORT}-${RTC_MAX_PORT}`);
-}
-
-const WORKER_SETTINGS = {
-  logLevel: 'warn',
-  rtcMinPort: RTC_MIN_PORT,
-  rtcMaxPort: RTC_MAX_PORT,
-};
+const WORKER_SETTINGS = buildWorkerSettings({
+  minPort: process.env.MEDIASOUP_RTC_MIN_PORT || 10000,
+  maxPort: process.env.MEDIASOUP_RTC_MAX_PORT || 10100,
+});
 const INITIAL_AVAILABLE_OUTGOING_BITRATE = Number(
-  process.env.MEDIASOUP_INITIAL_OUTGOING_BITRATE || 18_000_000
+  process.env.MEDIASOUP_INITIAL_OUTGOING_BITRATE || 2_000_000
 );
-
-function isPrivateIpv4(address) {
-  if (typeof address !== 'string') return false;
-  if (address.startsWith('10.')) return true;
-  if (address.startsWith('192.168.')) return true;
-  const match = address.match(/^172\.(\d+)\./);
-  if (!match) return false;
-  const secondOctet = Number(match[1]);
-  return secondOctet >= 16 && secondOctet <= 31;
-}
-
-function resolveAnnouncedIp() {
-  if (process.env.ANNOUNCED_IP) {
-    return process.env.ANNOUNCED_IP;
-  }
-
-  const candidates = [];
-  const interfaces = os.networkInterfaces();
-  for (const entries of Object.values(interfaces)) {
-    for (const entry of entries || []) {
-      if (!entry || entry.internal || entry.family !== 'IPv4') continue;
-      candidates.push(entry.address);
-    }
-  }
-
-  const privateAddress = candidates.find(isPrivateIpv4);
-  if (privateAddress) return privateAddress;
-  if (candidates.length > 0) return candidates[0];
-  return '127.0.0.1';
-}
-
+const MAX_INCOMING_BITRATE = Number(
+  process.env.MEDIASOUP_MAX_INCOMING_BITRATE || 12_000_000
+);
+const MAX_OUTGOING_BITRATE = Number(
+  process.env.MEDIASOUP_MAX_OUTGOING_BITRATE || 12_000_000
+);
+const ENABLE_EXPERIMENTAL_SCREEN_CODECS = process.env.MEDIASOUP_ENABLE_EXPERIMENTAL_SCREEN_CODECS === '1';
+const ENABLE_EXPERIMENTAL_AV1 = process.env.MEDIASOUP_ENABLE_EXPERIMENTAL_AV1 === '1';
 const ANNOUNCED_IP = resolveAnnouncedIp();
-
-const ROUTER_MEDIA_CODECS = [
-  {
-    kind: 'audio',
-    mimeType: 'audio/opus',
-    clockRate: 48000,
-    channels: 2,
-  },
-  {
-    kind: 'video',
-    mimeType: 'video/VP8',
-    clockRate: 90000,
-  },
-];
-
-const WEBRTC_TRANSPORT_OPTIONS = {
-  listenIps: [
-    {
-      ip: '0.0.0.0',
-      announcedIp: ANNOUNCED_IP,
-    },
-  ],
-  enableUdp: true,
-  enableTcp: true,
-  preferUdp: true,
+const ROUTER_MEDIA_CODECS = buildRouterMediaCodecs({
+  enableExperimentalScreenCodecs: ENABLE_EXPERIMENTAL_SCREEN_CODECS,
+  enableExperimentalAv1: ENABLE_EXPERIMENTAL_AV1,
+});
+const WEBRTC_TRANSPORT_OPTIONS = buildWebRtcTransportOptions({
+  announcedIp: ANNOUNCED_IP,
   initialAvailableOutgoingBitrate: INITIAL_AVAILABLE_OUTGOING_BITRATE,
-};
-
+});
+const TARGET_WORKER_COUNT = resolveTargetWorkerCount();
+const WORKER_RESPAWN_DELAY_MS = 1_000;
 const workers = [];
 let nextWorkerIndex = 0;
+let workerRefillPromise = null;
+let workerRefillTimer = null;
 
-// Map<channelId, { router, peers: Map<userId, PeerState> }>
+// Map<channelId, { router, peers: Map<userId, PeerState>, workerPid: number }>
 const rooms = new Map();
+const voiceTransportMediaRuntime = createVoiceTransportMediaRuntime({
+  rooms,
+});
 
-function createPeerState() {
-  return {
-    sendTransport: null,
-    recvTransport: null,
-    producers: new Map(),
-    consumers: new Map(),
-  };
+function scheduleWorkerRefill(delayMs = WORKER_RESPAWN_DELAY_MS) {
+  scheduleVoiceWorkerRefill({
+    workers,
+    targetWorkerCount: TARGET_WORKER_COUNT,
+    getWorkerRefillPromiseFn: () => workerRefillPromise,
+    getWorkerRefillTimerFn: () => workerRefillTimer,
+    setWorkerRefillTimerFn: (value) => {
+      workerRefillTimer = value;
+    },
+    delayMs,
+    refillWorkersFn: refillWorkers,
+    setTimeoutFn: setTimeout,
+    logErrorFn: console.error,
+  });
 }
 
-async function createWorkers() {
-  const numWorkers = Math.min(os.cpus().length, 2);
-  console.log(`[mediasoup] Using announced IP ${ANNOUNCED_IP}`);
-  for (let i = 0; i < numWorkers; i++) {
-    const worker = await mediasoup.createWorker(WORKER_SETTINGS);
-    worker.on('died', () => {
-      console.error(`mediasoup Worker ${worker.pid} died - removing from pool`);
-      const idx = workers.indexOf(worker);
-      if (idx !== -1) workers.splice(idx, 1);
-      for (const [channelId, room] of rooms) {
-        if (room.router.closed) {
-          rooms.delete(channelId);
-        }
-      }
-    });
-    workers.push(worker);
-  }
-  console.log(`mediasoup: ${workers.length} worker(s) created`);
+function attachWorkerLifecycle(worker) {
+  attachVoiceWorkerLifecycle({
+    worker,
+    workers,
+    rooms,
+    getNextWorkerIndexFn: () => nextWorkerIndex,
+    setNextWorkerIndexFn: (value) => {
+      nextWorkerIndex = value;
+    },
+    dropVoiceRoomReferenceFn: dropVoiceRoomReference,
+    scheduleVoiceWorkerRefillFn: scheduleWorkerRefill,
+    logErrorFn: console.error,
+  });
 }
 
-function getNextWorker() {
-  if (workers.length === 0) {
-    throw new Error('No mediasoup workers available - all workers have died');
-  }
-  const worker = workers[nextWorkerIndex % workers.length];
-  nextWorkerIndex = (nextWorkerIndex + 1) % workers.length;
+async function spawnWorker() {
+  const worker = await mediasoup.createWorker(WORKER_SETTINGS);
+  attachWorkerLifecycle(worker);
+  workers.push(worker);
   return worker;
 }
 
+async function refillWorkers() {
+  return refillVoiceWorkers({
+    workers,
+    targetWorkerCount: TARGET_WORKER_COUNT,
+    getWorkerRefillPromiseFn: () => workerRefillPromise,
+    setWorkerRefillPromiseFn: (value) => {
+      workerRefillPromise = value;
+    },
+    scheduleVoiceWorkerRefillFn: scheduleWorkerRefill,
+    spawnWorkerFn: spawnWorker,
+    logErrorFn: console.error,
+  });
+}
+
+async function createWorkers() {
+  console.log(`[mediasoup] Using announced IP ${ANNOUNCED_IP}`);
+  await refillWorkers();
+  console.log(`mediasoup: ${workers.length} worker(s) ready`);
+}
+
+function getNextWorker() {
+  return getNextVoiceWorker({
+    workers,
+    nextWorkerIndex,
+    setNextWorkerIndexFn: (value) => {
+      nextWorkerIndex = value;
+    },
+  });
+}
+
 async function getOrCreateRoom(channelId) {
-  if (rooms.has(channelId)) return rooms.get(channelId);
-  const worker = getNextWorker();
-  const router = await worker.createRouter({ mediaCodecs: ROUTER_MEDIA_CODECS });
-  const room = { router, peers: new Map() };
-  rooms.set(channelId, room);
-  return room;
+  return getOrCreateVoiceRoom({
+    rooms,
+    channelId,
+    getNextWorkerFn: getNextWorker,
+    createRouterOptions: { mediaCodecs: ROUTER_MEDIA_CODECS },
+  });
 }
 
 function getRoom(channelId) {
@@ -134,40 +152,26 @@ function getRoom(channelId) {
 }
 
 function removeRoom(channelId) {
-  const room = rooms.get(channelId);
-  if (room) {
-    room.router.close();
-    rooms.delete(channelId);
-  }
+  removeVoiceRoom(rooms, channelId);
 }
 
-async function createWebRtcTransport(channelId, userId, direction) {
+function hasAvailableWorkers() {
+  return workers.length > 0;
+}
+
+async function createWebRtcTransport(channelId, userId, direction, purpose = 'voice') {
   const room = await getOrCreateRoom(channelId);
   const transport = await room.router.createWebRtcTransport(WEBRTC_TRANSPORT_OPTIONS);
-
-  if (!room.peers.has(userId)) {
-    room.peers.set(userId, createPeerState());
-  }
-
-  const peer = room.peers.get(userId);
-  if (direction === 'send') {
-    if (peer.sendTransport) {
-      try { peer.sendTransport.close(); } catch {}
-    }
-    peer.sendTransport = transport;
-  } else {
-    if (peer.recvTransport) {
-      try { peer.recvTransport.close(); } catch {}
-    }
-    peer.recvTransport = transport;
-  }
-
-  return {
-    id: transport.id,
-    iceParameters: transport.iceParameters,
-    iceCandidates: transport.iceCandidates,
-    dtlsParameters: transport.dtlsParameters,
-  };
+  return prepareVoiceTransportRegistration({
+    room,
+    userId,
+    direction,
+    purpose,
+    transport,
+    maxIncomingBitrate: MAX_INCOMING_BITRATE,
+    maxOutgoingBitrate: MAX_OUTGOING_BITRATE,
+    logWarnFn: console.warn,
+  });
 }
 
 async function connectTransport(channelId, userId, transportId, dtlsParameters) {
@@ -176,185 +180,53 @@ async function connectTransport(channelId, userId, transportId, dtlsParameters) 
   const peer = room.peers.get(userId);
   if (!peer) throw new Error('Peer not found');
 
-  const transport =
-    peer.sendTransport?.id === transportId
-      ? peer.sendTransport
-      : peer.recvTransport;
+  const transport = getTransportById(peer, transportId);
   if (!transport) throw new Error('Transport not found');
 
   await transport.connect({ dtlsParameters });
 }
 
 async function produce(channelId, userId, transportId, kind, rtpParameters, appData = {}) {
-  const room = rooms.get(channelId);
-  if (!room) throw new Error('Room not found');
-  const peer = room.peers.get(userId);
-  if (!peer || !peer.sendTransport) throw new Error('Send transport not found');
-
-  const source = appData?.source || kind;
-
-  for (const meta of peer.producers.values()) {
-    if (meta.source !== source) continue;
-    try { meta.producer.close(); } catch {}
-  }
-
-  const producer = await peer.sendTransport.produce({
-    kind,
-    rtpParameters,
-    appData: { source },
-  });
-
-  const removeProducer = () => {
-    if (!peer.producers.has(producer.id)) return;
-    peer.producers.delete(producer.id);
-  };
-
-  producer.on('transportclose', () => {
-    removeProducer();
-    try { producer.close(); } catch {}
-  });
-  if (producer.observer?.on) {
-    producer.observer.on('close', removeProducer);
-  }
-
-  peer.producers.set(producer.id, {
-    producer,
-    kind,
-    source,
-  });
-
-  return {
-    producerId: producer.id,
-    kind,
-    source,
-    producer,
-  };
+  return voiceTransportMediaRuntime.produce(channelId, userId, transportId, kind, rtpParameters, appData);
 }
 
 async function consume(channelId, consumerUserId, producerUserId, producerId, rtpCapabilities) {
-  const room = rooms.get(channelId);
-  if (!room) throw new Error('Room not found');
+  return voiceTransportMediaRuntime.consume(channelId, consumerUserId, producerUserId, producerId, rtpCapabilities);
+}
 
-  if (!room.router.canConsume({ producerId, rtpCapabilities })) {
-    throw new Error('Cannot consume');
-  }
+async function resumeConsumer(channelId, consumerUserId, producerId) {
+  return voiceTransportMediaRuntime.resumeConsumer(channelId, consumerUserId, producerId);
+}
 
-  const consumerPeer = room.peers.get(consumerUserId);
-  if (!consumerPeer || !consumerPeer.recvTransport) {
-    throw new Error('Recv transport not found');
-  }
-
-  const consumer = await consumerPeer.recvTransport.consume({
-    producerId,
-    rtpCapabilities,
-    paused: false,
-  });
-
-  consumer.on('transportclose', () => consumer.close());
-  consumer.on('producerclose', () => {
-    consumer.close();
-    consumerPeer.consumers.delete(producerId);
-  });
-
-  consumerPeer.consumers.set(producerId, consumer);
-
-  return {
-    id: consumer.id,
-    producerId,
-    kind: consumer.kind,
-    rtpParameters: consumer.rtpParameters,
-  };
+async function updateConsumerQuality(channelId, consumerUserId, producerId, payload = {}) {
+  return voiceTransportMediaRuntime.updateConsumerQuality(channelId, consumerUserId, producerId, payload);
 }
 
 function removePeer(channelId, userId) {
-  const room = rooms.get(channelId);
-  if (!room) return;
-  const peer = room.peers.get(userId);
-  if (!peer) return;
-
-  for (const consumer of peer.consumers.values()) {
-    consumer.close();
-  }
-  for (const meta of peer.producers.values()) {
-    meta.producer.close();
-  }
-  if (peer.sendTransport) peer.sendTransport.close();
-  if (peer.recvTransport) peer.recvTransport.close();
-
-  room.peers.delete(userId);
-  if (room.peers.size === 0) removeRoom(channelId);
+  removeVoicePeer({
+    rooms,
+    channelId,
+    userId,
+    removeRoomFn: removeRoom,
+  });
 }
 
 function getRoomPeers(channelId) {
-  const room = rooms.get(channelId);
-  if (!room) return [];
-  return [...room.peers.keys()];
+  return listVoiceRoomPeers(rooms, channelId);
 }
 
 function getProducersForPeer(channelId, userId) {
-  const room = rooms.get(channelId);
-  if (!room) return [];
-  const peer = room.peers.get(userId);
-  if (!peer) return [];
-  return [...peer.producers.entries()].map(([producerId, meta]) => ({
-    producerId,
-    producerUserId: userId,
-    kind: meta.kind,
-    source: meta.source,
-  }));
+  return listVoicePeerProducers(rooms, channelId, userId);
 }
 
 function getStatsSnapshot() {
-  let peerCount = 0;
-  let transportCount = 0;
-  let producerCount = 0;
-  let consumerCount = 0;
-  const roomsSummary = [];
-
-  for (const [channelId, room] of rooms) {
-    let roomTransportCount = 0;
-    let roomProducerCount = 0;
-    let roomConsumerCount = 0;
-
-    peerCount += room.peers.size;
-
-    for (const peer of room.peers.values()) {
-      if (peer.sendTransport) {
-        transportCount += 1;
-        roomTransportCount += 1;
-      }
-      if (peer.recvTransport) {
-        transportCount += 1;
-        roomTransportCount += 1;
-      }
-
-      producerCount += peer.producers.size;
-      consumerCount += peer.consumers.size;
-      roomProducerCount += peer.producers.size;
-      roomConsumerCount += peer.consumers.size;
-    }
-
-    roomsSummary.push({
-      channelId,
-      peers: room.peers.size,
-      transports: roomTransportCount,
-      producers: roomProducerCount,
-      consumers: roomConsumerCount,
-    });
-  }
-
-  roomsSummary.sort((a, b) => b.peers - a.peers || a.channelId.localeCompare(b.channelId));
-
-  return {
+  return buildVoiceRoomStatsSnapshot({
+    rooms,
     announcedIp: ANNOUNCED_IP,
     workerCount: workers.length,
-    roomCount: rooms.size,
-    peerCount,
-    transportCount,
-    producerCount,
-    consumerCount,
-    rooms: roomsSummary,
-  };
+    targetWorkerCount: TARGET_WORKER_COUNT,
+    recoveryPending: Boolean(workerRefillPromise || workerRefillTimer),
+  });
 }
 
 module.exports = {
@@ -362,10 +234,13 @@ module.exports = {
   getOrCreateRoom,
   getRoom,
   removeRoom,
+  hasAvailableWorkers,
   createWebRtcTransport,
   connectTransport,
   produce,
   consume,
+  resumeConsumer,
+  updateConsumerQuality,
   removePeer,
   getRoomPeers,
   getProducersForPeer,

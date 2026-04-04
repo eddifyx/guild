@@ -1,6 +1,6 @@
-import { deleteUploadedFile, uploadEncryptedFile } from '../api';
-import { encryptAttachment } from '../crypto/attachmentEncryption';
-import { isE2EInitialized } from '../crypto/sessionManager';
+import { deleteUploadedFile, uploadEncryptedFile } from '../api.js';
+import { encryptAttachment } from '../crypto/attachmentEncryption.js';
+import { isE2EInitialized } from '../crypto/sessionManager.js';
 
 export async function uploadChatAttachment(file) {
   if (!isE2EInitialized()) {

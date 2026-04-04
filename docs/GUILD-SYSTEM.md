@@ -36,7 +36,7 @@ Guild Master (rank 0) always has all permissions. Members can only affect ranks 
 | 1 | Officer | invite, remove, promote/demote, officer chat, manage rooms/theme |
 | 2 | Veteran | invite, guild chat, edit public note, upload/download files |
 | 3 | Member | guild chat, edit public note, view/download files |
-| 4 | Initiate | guild chat listen only, view asset dump |
+| 4 | Initiate | guild chat, view asset dump |
 
 ## Server Routes
 

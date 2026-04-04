@@ -10,11 +10,17 @@ server/updates/*
 client/out/
 client/dist/
 client/.vite/
+mobile/node_modules/
+mobile/.expo/
+mobile/dist/
 .env
 .env.*
 .DS_Store
 *.log
 *.zip
+*.ipa
+*.apk
+*.aab
 *.etl
 *.pcapng
 .tmp/

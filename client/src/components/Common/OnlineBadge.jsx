@@ -1,3 +1,4 @@
+import React from 'react';
 export default function OnlineBadge({ online, size = 10 }) {
   return (
     <div

@@ -6,8 +6,17 @@ function getOnlineUserIds() {
 }
 
 function getOnlineList(io, requesterId = null) {
-  const { getUserById, getVisibleUserIds } = require('../db');
-  const visibleIds = requesterId ? getVisibleUserIds(requesterId) : null;
+  const {
+    getUserById,
+    listVisibleGuildmateIds,
+    listVisibleContactUserIds,
+  } = require('../db');
+  const { buildVisibleUserIdSet } = require('../domain/users/visibility');
+  const visibleIds = requesterId ? buildVisibleUserIdSet({
+    requesterUserId: requesterId,
+    guildmateRows: listVisibleGuildmateIds.all(requesterId),
+    contactRows: listVisibleContactUserIds.all(requesterId),
+  }) : null;
   const list = [];
 
   for (const [userId, sockets] of onlineUsers) {

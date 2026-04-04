@@ -1,7 +1,9 @@
 const path = require('path');
 const fs = require('fs');
 const { execFileSync } = require('child_process');
+const { notarize } = require('@electron/notarize');
 const { VitePlugin } = require('@electron-forge/plugin-vite');
+const { getAppFlavor, resolveFlavorAsset, resolveFlavorIconBase } = require('./config/appFlavor');
 
 // Native modules that must be copied into the packaged app.
 // Vite externalizes these (can't bundle .node addons), and npm workspaces
@@ -9,12 +11,15 @@ const { VitePlugin } = require('@electron-forge/plugin-vite');
 const NATIVE_DEPS = ['@signalapp/libsignal-client', 'better-sqlite3'];
 const RUNTIME_TRANSITIVE_DEPS = ['node-gyp-build', 'uuid', 'bindings', 'file-uri-to-path'];
 const PACKAGED_VENDOR_DEPS = ['@signalapp/libsignal-client', 'node-gyp-build', 'uuid'];
-const RUNTIME_SOURCE_DIRS = ['electron/crypto'];
+const RUNTIME_SOURCE_DIRS = ['config', 'electron/crypto'];
 const APPLE_VOICE_HELPER_RELATIVE_DIR = path.join('electron', 'native', 'appleVoiceProcessing');
 const APPLE_VOICE_HELPER_SOURCE_NAME = 'AppleVoiceIsolationCapture.swift';
 const APPLE_VOICE_HELPER_BINARY_NAME = 'apple-voice-isolation-capture';
-const APP_PACKAGE_NAME = 'guild';
-const MAC_APP_BUNDLE_ID = process.env.GUILD_MAC_BUNDLE_ID || 'is.1984.guild';
+const APP_FLAVOR = getAppFlavor(process.env.GUILD_APP_FLAVOR);
+const APP_PACKAGE_NAME = APP_FLAVOR.appName;
+const APP_DISPLAY_NAME = APP_FLAVOR.menuName || APP_FLAVOR.appName;
+const APP_EXECUTABLE_NAME = APP_FLAVOR.executableName;
+const MAC_APP_BUNDLE_ID = process.env.GUILD_MAC_BUNDLE_ID || APP_FLAVOR.macBundleId;
 const MAC_HELPER_BUNDLE_ID = `${MAC_APP_BUNDLE_ID}.helper`;
 
 function getMacSignConfig() {
@@ -72,6 +77,20 @@ function copyDirSync(src, dest) {
   }
 }
 
+function resolveInstalledPackagePath(packageName) {
+  try {
+    const packageJsonPath = require.resolve(`${packageName}/package.json`, {
+      paths: [
+        __dirname,
+        path.resolve(__dirname, '..'),
+      ],
+    });
+    return path.dirname(packageJsonPath);
+  } catch {
+    return null;
+  }
+}
+
 function removePathSync(targetPath) {
   fs.rmSync(targetPath, { recursive: true, force: true });
 }
@@ -105,11 +124,10 @@ function compileAppleVoiceHelper(sourceDir) {
 }
 
 function copyRuntimePackagesIntoNodeModules(destinationNodeModules) {
-  const rootModules = path.resolve(__dirname, 'node_modules');
   fs.mkdirSync(destinationNodeModules, { recursive: true });
 
   for (const dep of NATIVE_DEPS) {
-    const src = path.join(rootModules, dep);
+    const src = resolveInstalledPackagePath(dep);
     const dest = path.join(destinationNodeModules, dep);
     if (fs.existsSync(src)) {
       copyDirSync(src, dest);
@@ -120,7 +138,7 @@ function copyRuntimePackagesIntoNodeModules(destinationNodeModules) {
   // libsignal-client needs: node-gyp-build (loads .node) and uuid
   // better-sqlite3 needs: bindings (loads .node), file-uri-to-path
   for (const dep of RUNTIME_TRANSITIVE_DEPS) {
-    const src = path.join(rootModules, dep);
+    const src = resolveInstalledPackagePath(dep);
     const dest = path.join(destinationNodeModules, dep);
     if (fs.existsSync(src)) {
       copyDirSync(src, dest);
@@ -129,11 +147,10 @@ function copyRuntimePackagesIntoNodeModules(destinationNodeModules) {
 }
 
 function copySelectedPackagesIntoNodeModules(destinationNodeModules, packageNames) {
-  const rootModules = path.resolve(__dirname, 'node_modules');
   fs.mkdirSync(destinationNodeModules, { recursive: true });
 
   for (const dep of packageNames) {
-    const src = path.join(rootModules, dep);
+    const src = resolveInstalledPackagePath(dep);
     const dest = path.join(destinationNodeModules, dep);
     if (fs.existsSync(src)) {
       removePathSync(dest);
@@ -229,7 +246,7 @@ function pruneRuntimeFilesInBuild(buildPath, target = getRuntimeTarget()) {
 function copyRuntimeVendorIntoPackagedApp(outputPath, platform) {
   if (!outputPath) return;
 
-  const appBundlePath = outputPath.endsWith('.app') ? outputPath : path.join(outputPath, `${APP_PACKAGE_NAME}.app`);
+  const appBundlePath = outputPath.endsWith('.app') ? outputPath : path.join(outputPath, APP_FLAVOR.appBundleName);
   const resourcesDir = platform === 'darwin'
     ? path.join(appBundlePath, 'Contents', 'Resources')
     : path.join(outputPath, 'resources');
@@ -265,7 +282,7 @@ function signPackagedDarwinApp(outputPath, platform) {
   if (process.env.GUILD_MAC_SIGN !== '1') return;
 
   const identity = process.env.GUILD_MAC_SIGN_IDENTITY || 'Developer ID Application';
-  const appBundlePath = outputPath.endsWith('.app') ? outputPath : path.join(outputPath, `${APP_PACKAGE_NAME}.app`);
+  const appBundlePath = outputPath.endsWith('.app') ? outputPath : path.join(outputPath, APP_FLAVOR.appBundleName);
   const resourcesDir = path.join(appBundlePath, 'Contents', 'Resources');
   const appleVoiceHelperDir = path.join(resourcesDir, APPLE_VOICE_HELPER_RELATIVE_DIR, 'bin');
 
@@ -310,15 +327,31 @@ function signPackagedDarwinApp(outputPath, platform) {
   );
 }
 
+async function notarizePackagedDarwinApp(outputPath, platform) {
+  if (platform !== 'darwin') return;
+  if (process.env.GUILD_MAC_SIGN !== '1') return;
+
+  const notarizeConfig = getMacNotarizeConfig();
+  if (!notarizeConfig) return;
+
+  const appBundlePath = outputPath.endsWith('.app') ? outputPath : path.join(outputPath, APP_FLAVOR.appBundleName);
+  await notarize({
+    appPath: appBundlePath,
+    ...notarizeConfig,
+  });
+}
+
 module.exports = {
   packagerConfig: {
     name: APP_PACKAGE_NAME,
-    executableName: APP_PACKAGE_NAME,
+    executableName: APP_EXECUTABLE_NAME,
     appBundleId: MAC_APP_BUNDLE_ID,
     helperBundleId: MAC_HELPER_BUNDLE_ID,
-    icon: path.join(__dirname, 'assets', 'icon'),  // .ico/.icns auto-resolved per platform
+    icon: resolveFlavorIconBase(__dirname, APP_FLAVOR),  // .ico/.icns auto-resolved per platform
     appCategoryType: 'public.app-category.social-networking',
     extendInfo: {
+      CFBundleDisplayName: APP_DISPLAY_NAME,
+      CFBundleName: APP_DISPLAY_NAME,
       // Allow packaged macOS builds to expose Mic Modes such as Voice Isolation
       // while /guild is actively using the microphone.
       NSAlwaysAllowMicrophoneModeControl: true,
@@ -341,6 +374,8 @@ module.exports = {
       await rebuild({
         buildPath,
         electronVersion: require('./package.json').devDependencies.electron.replace('^', ''),
+        platform: platform || process.platform,
+        arch: arch || process.arch,
         force: true,
       });
 
@@ -350,6 +385,7 @@ module.exports = {
       for (const outputPath of packageResult.outputPaths) {
         copyRuntimeVendorIntoPackagedApp(outputPath, packageResult.platform);
         signPackagedDarwinApp(outputPath, packageResult.platform);
+        await notarizePackagedDarwinApp(outputPath, packageResult.platform);
       }
     },
   },
@@ -357,9 +393,9 @@ module.exports = {
     {
       name: '@electron-forge/maker-dmg',
       config: {
-        title: 'guild',
-        background: path.join(__dirname, 'assets', 'dmg-background.png'),
-        icon: path.join(__dirname, 'assets', 'icon.png'),
+        title: APP_DISPLAY_NAME,
+        background: resolveFlavorAsset(__dirname, APP_FLAVOR, 'dmg-background', '.png'),
+        icon: resolveFlavorAsset(__dirname, APP_FLAVOR, 'icon', '.png'),
         format: 'ULFO',
         contents: (opts) => ([
           { x: 188, y: 248, type: 'file', path: opts.appPath },

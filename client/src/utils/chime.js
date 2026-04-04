@@ -6,9 +6,9 @@ let chimeOutputAudio = null;
 let currentSinkId = null;
 let chimeBusInput = null;
 const CHIME_START_DELAY_SECONDS = 0.045;
-const PEER_JOIN_CHIME_GAIN = 0.14;
-const PEER_LEAVE_CHIME_GAIN = 0.115;
-const SELF_CONNECT_CHIME_GAIN = 0.12;
+const PEER_JOIN_CHIME_GAIN = 0.17;
+const PEER_LEAVE_CHIME_GAIN = 0.14;
+const SELF_CONNECT_CHIME_GAIN = 0.15;
 
 async function getCtx() {
   if (!audioCtx || audioCtx.state === 'closed') {
@@ -64,11 +64,19 @@ async function ensureChimeOutput(ctx) {
   }
 
   const selectedSinkId = localStorage.getItem('voice:outputDeviceId') || 'default';
-  if (typeof chimeOutputAudio.setSinkId === 'function' && currentSinkId !== selectedSinkId) {
+  const shouldApplySinkId = typeof chimeOutputAudio.setSinkId === 'function'
+    && (
+      selectedSinkId !== 'default'
+      || (currentSinkId && currentSinkId !== 'default')
+    )
+    && currentSinkId !== selectedSinkId;
+  if (shouldApplySinkId) {
     try {
       await chimeOutputAudio.setSinkId(selectedSinkId);
       currentSinkId = selectedSinkId;
     } catch {}
+  } else if (!currentSinkId) {
+    currentSinkId = selectedSinkId;
   }
 
   if (chimeOutputAudio.paused) {

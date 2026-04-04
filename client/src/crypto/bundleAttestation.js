@@ -1,6 +1,9 @@
 import { verifyEvent, nip19 } from 'nostr-tools';
-import { getLoginMode, getSigner } from '../utils/nostrConnect.js';
+import { getLoginMode, getSigner, reconnect } from '../utils/nostrConnect.js';
 import { getUserPubkey } from '../utils/nostrConnect.js';
+import {
+  resolveSignalBundleAttestationSignerSession,
+} from '../features/crypto/signalBundleAttestationSessionRuntime.mjs';
 
 export const BUNDLE_ATTESTATION_KIND = 27235;
 export const BUNDLE_ATTESTATION_SCOPE = 'byzantine-signal-bundle-v1';
@@ -66,8 +69,11 @@ function buildBundleAttestationEvent(bundle, { compatibilityMode = false, pubkey
 }
 
 export async function signBundleAttestation(bundle) {
-  const signer = getSigner();
-  const pubkey = getUserPubkey();
+  const { signer, pubkey } = await resolveSignalBundleAttestationSignerSession({
+    getSignerFn: getSigner,
+    getUserPubkeyFn: getUserPubkey,
+    reconnectSignerFn: reconnect,
+  });
   if (!signer?.signEvent) {
     throw new Error('Nostr signer unavailable for Signal identity attestation');
   }

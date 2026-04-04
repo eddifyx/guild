@@ -1,4 +1,5 @@
-import { useState } from 'react';
+import React, { useState } from 'react';
+import { isVoiceDiagnosticsEnabled } from '../../utils/voiceDiagnostics';
 
 function formatValue(value) {
   if (value === null || value === undefined || value === '') return '—';
@@ -48,12 +49,13 @@ function DiagnosticsCard({ title, children }) {
 }
 
 export default function VoiceDiagnosticsPanel({ liveDiagnostics, testDiagnostics }) {
-  if (!import.meta.env.DEV) return null;
+  if (!isVoiceDiagnosticsEnabled()) return null;
 
   const [isOpen, setIsOpen] = useState(false);
 
   const liveCapture = liveDiagnostics?.liveCapture;
   const liveSender = liveDiagnostics?.senderStats;
+  const screenShare = liveDiagnostics?.screenShare;
   const liveConsumers = Object.entries(liveDiagnostics?.consumers || {});
   const testCapture = testDiagnostics;
 
@@ -153,6 +155,33 @@ export default function VoiceDiagnosticsPanel({ liveDiagnostics, testDiagnostics
           <MetricRow label="Remote Jitter (ms)" value={liveSender?.remoteInboundAudio?.jitterMs} />
           <MetricRow label="Candidate RTT (ms)" value={liveSender?.candidatePair?.currentRoundTripTimeMs} />
           <MetricRow label="Outgoing Bitrate" value={liveSender?.candidatePair?.availableOutgoingBitrate} />
+        </DiagnosticsCard>
+
+        <DiagnosticsCard title="Screen Share">
+          <MetricRow label="Active" value={screenShare?.active} />
+          <MetricRow label="Sampled" value={screenShare?.sampledAt} />
+          <MetricRow label="Adaptive Profile" value={screenShare?.activeProfile?.label} />
+          <MetricRow label="Target Resolution" value={screenShare?.activeProfile?.targetResolution || screenShare?.requestedCapture?.minimumResolution} />
+          <MetricRow label="Target FPS" value={screenShare?.activeProfile?.targetFps || screenShare?.requestedCapture?.targetFps} />
+          <MetricRow label="Requested Codec" value={screenShare?.selectedCodec?.mimeType} />
+          <MetricRow label="Requested Hint" value={screenShare?.requestedContentHint} />
+          <MetricRow label="Adaptation Reason" value={screenShare?.adaptation?.lastReason} />
+          <MetricRow label="Adapted At" value={screenShare?.adaptation?.lastChangedAt} />
+          <MetricRow label="Hardware Hint" value={screenShare?.adaptation?.hardware?.lowResourceHint} />
+          <MetricRow label="Captured Width" value={screenShare?.captureTrack?.settings?.width} />
+          <MetricRow label="Captured Height" value={screenShare?.captureTrack?.settings?.height} />
+          <MetricRow label="Captured FPS" value={screenShare?.captureTrack?.settings?.frameRate} />
+          <MetricRow label="Active Codec" value={screenShare?.sender?.outboundVideo?.codecMimeType} />
+          <MetricRow label="Encoder" value={screenShare?.sender?.outboundVideo?.encoderImplementation} />
+          <MetricRow label="Power Efficient" value={screenShare?.sender?.outboundVideo?.powerEfficientEncoder} />
+          <MetricRow label="Sent Width" value={screenShare?.sender?.outboundVideo?.frameWidth} />
+          <MetricRow label="Sent Height" value={screenShare?.sender?.outboundVideo?.frameHeight} />
+          <MetricRow label="Sent FPS" value={screenShare?.sender?.outboundVideo?.framesPerSecond} />
+          <MetricRow label="Sent Bitrate (kbps)" value={screenShare?.sender?.outgoingBitrateKbps} />
+          <MetricRow label="Quality Limitation" value={screenShare?.sender?.outboundVideo?.qualityLimitationReason} />
+          <MetricRow label="Remote RTT (ms)" value={screenShare?.sender?.remoteInboundVideo?.roundTripTimeMs} />
+          <MetricRow label="Candidate RTT (ms)" value={screenShare?.sender?.candidatePair?.currentRoundTripTimeMs} />
+          <MetricRow label="Available Outgoing Bitrate" value={screenShare?.sender?.candidatePair?.availableOutgoingBitrate} />
         </DiagnosticsCard>
 
         <DiagnosticsCard title="Mic Test">

@@ -14,129 +14,10 @@
  */
 
 import {
-  aes256GcmEncrypt,
-  aes256GcmDecrypt,
-  hkdfSha256,
   randomBytes,
-  constantTimeEqual,
-  concatBytes,
-  toBase64,
-  fromBase64,
 } from './primitives.js';
-
-const DB_NAME = 'byzantine-keystore';
-const DB_VERSION = 1;
-
-const STORES = [
-  'identity',
-  'signedPreKeys',
-  'oneTimePreKeys',
-  'sessions',
-  'senderKeys',
-  'trustedIdentities',
-];
-
-// ---------------------------------------------------------------------------
-// IndexedDB helpers
-// ---------------------------------------------------------------------------
-
-function openDB() {
-  return new Promise((resolve, reject) => {
-    const req = indexedDB.open(DB_NAME, DB_VERSION);
-    req.onupgradeneeded = (e) => {
-      const db = e.target.result;
-      for (const name of STORES) {
-        if (!db.objectStoreNames.contains(name)) {
-          db.createObjectStore(name);
-        }
-      }
-    };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
-  });
-}
-
-function idbGet(db, storeName, key) {
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(storeName, 'readonly');
-    const req = tx.objectStore(storeName).get(key);
-    req.onsuccess = () => resolve(req.result ?? null);
-    req.onerror = () => reject(req.error);
-  });
-}
-
-function idbPut(db, storeName, key, value) {
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(storeName, 'readwrite');
-    tx.objectStore(storeName).put(value, key);
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-    tx.onabort = () => reject(tx.error);
-  });
-}
-
-function idbDelete(db, storeName, key) {
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(storeName, 'readwrite');
-    tx.objectStore(storeName).delete(key);
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-    tx.onabort = () => reject(tx.error);
-  });
-}
-
-function idbGetAll(db, storeName) {
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(storeName, 'readonly');
-    const req = tx.objectStore(storeName).getAll();
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
-  });
-}
-
-function idbGetAllKeys(db, storeName) {
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(storeName, 'readonly');
-    const req = tx.objectStore(storeName).getAllKeys();
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
-  });
-}
-
-function idbClearStore(db, storeName) {
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(storeName, 'readwrite');
-    tx.objectStore(storeName).clear();
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-    tx.onabort = () => reject(tx.error);
-  });
-}
-
-// ---------------------------------------------------------------------------
-// Encryption helpers
-// ---------------------------------------------------------------------------
-
-/**
- * Encrypt a value for storage. The storeName and key are bound as AAD
- * so ciphertext cannot be relocated to a different store/key slot.
- */
-function encryptValue(masterKey, value, storeName, key) {
-  const json = JSON.stringify(value);
-  const plaintext = new TextEncoder().encode(json);
-  const aad = new TextEncoder().encode(`${storeName}:${key}`);
-  const { ciphertext, nonce } = aes256GcmEncrypt(masterKey, plaintext, aad);
-  return { ct: toBase64(ciphertext), nc: toBase64(nonce) };
-}
-
-function decryptValue(masterKey, encrypted, storeName, key) {
-  const ciphertext = fromBase64(encrypted.ct);
-  const nonce = fromBase64(encrypted.nc);
-  const aad = new TextEncoder().encode(`${storeName}:${key}`);
-  const plaintext = aes256GcmDecrypt(masterKey, ciphertext, nonce, aad);
-  const json = new TextDecoder().decode(plaintext);
-  return JSON.parse(json);
-}
+import { createKeyStoreFacadeRuntime } from '../features/crypto/keyStoreFacadeRuntime.mjs';
+import { openKeyStoreDb } from '../features/crypto/keyStoreDbRuntime.mjs';
 
 // ---------------------------------------------------------------------------
 // Master Key Derivation
@@ -158,6 +39,10 @@ export class KeyStore {
   constructor() {
     this._db = null;
     this._masterKey = null;
+    this._runtime = createKeyStoreFacadeRuntime({
+      db: this._db,
+      masterKey: this._masterKey,
+    });
   }
 
   /**
@@ -166,7 +51,9 @@ export class KeyStore {
    */
   async initialize(masterKey) {
     this._masterKey = new Uint8Array(masterKey);
-    this._db = await openDB();
+    this._db = await openKeyStoreDb();
+    this._runtime.state.db = this._db;
+    this._runtime.state.masterKey = this._masterKey;
   }
 
   /**
@@ -181,6 +68,8 @@ export class KeyStore {
       this._db.close();
       this._db = null;
     }
+    this._runtime.state.db = this._db;
+    this._runtime.state.masterKey = this._masterKey;
   }
 
   _ensureOpen() {
@@ -195,15 +84,12 @@ export class KeyStore {
 
   async saveIdentityKeyPair(identityData) {
     this._ensureOpen();
-    const encrypted = encryptValue(this._masterKey, identityData, 'identity', 'self');
-    await idbPut(this._db, 'identity', 'self', encrypted);
+    await this._runtime.saveIdentityKeyPair(identityData);
   }
 
   async getIdentityKeyPair() {
     this._ensureOpen();
-    const encrypted = await idbGet(this._db, 'identity', 'self');
-    if (!encrypted) return null;
-    return decryptValue(this._masterKey, encrypted, 'identity', 'self');
+    return this._runtime.getIdentityKeyPair();
   }
 
   // -------------------------------------------------------------------------
@@ -212,26 +98,17 @@ export class KeyStore {
 
   async saveSignedPreKey(signedPreKey) {
     this._ensureOpen();
-    const encrypted = encryptValue(this._masterKey, signedPreKey, 'signedPreKeys', signedPreKey.keyId);
-    await idbPut(this._db, 'signedPreKeys', signedPreKey.keyId, encrypted);
+    await this._runtime.saveSignedPreKey(signedPreKey);
   }
 
   async getSignedPreKey(keyId) {
     this._ensureOpen();
-    const encrypted = await idbGet(this._db, 'signedPreKeys', keyId);
-    if (!encrypted) return null;
-    return decryptValue(this._masterKey, encrypted, 'signedPreKeys', keyId);
+    return this._runtime.getSignedPreKey(keyId);
   }
 
   async getLatestSignedPreKey() {
     this._ensureOpen();
-    const keys = await idbGetAllKeys(this._db, 'signedPreKeys');
-    if (keys.length === 0) return null;
-    let maxKeyId = keys[0];
-    for (let i = 1; i < keys.length; i++) {
-      if (keys[i] > maxKeyId) maxKeyId = keys[i];
-    }
-    return this.getSignedPreKey(maxKeyId);
+    return this._runtime.getLatestSignedPreKey();
   }
 
   /**
@@ -240,14 +117,7 @@ export class KeyStore {
    */
   async pruneOldSignedPreKeys(keepCount = 2) {
     this._ensureOpen();
-    const keys = await idbGetAllKeys(this._db, 'signedPreKeys');
-    if (keys.length <= keepCount) return;
-    // Sort ascending so we delete the oldest
-    const sorted = [...keys].sort((a, b) => a - b);
-    const toDelete = sorted.slice(0, sorted.length - keepCount);
-    for (const keyId of toDelete) {
-      await idbDelete(this._db, 'signedPreKeys', keyId);
-    }
+    await this._runtime.pruneOldSignedPreKeys(keepCount);
   }
 
   // -------------------------------------------------------------------------
@@ -256,41 +126,22 @@ export class KeyStore {
 
   async saveOneTimePreKeys(preKeys) {
     this._ensureOpen();
-    // Use a single transaction for atomicity — all-or-nothing
-    await new Promise((resolve, reject) => {
-      const tx = this._db.transaction('oneTimePreKeys', 'readwrite');
-      const store = tx.objectStore('oneTimePreKeys');
-      for (const pk of preKeys) {
-        const encrypted = encryptValue(this._masterKey, pk, 'oneTimePreKeys', pk.keyId);
-        store.put(encrypted, pk.keyId);
-      }
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error);
-      tx.onabort = () => reject(tx.error);
-    });
+    await this._runtime.saveOneTimePreKeys(preKeys);
   }
 
   async getOneTimePreKey(keyId) {
     this._ensureOpen();
-    const encrypted = await idbGet(this._db, 'oneTimePreKeys', keyId);
-    if (!encrypted) return null;
-    return decryptValue(this._masterKey, encrypted, 'oneTimePreKeys', keyId);
+    return this._runtime.getOneTimePreKey(keyId);
   }
 
   async markOneTimePreKeyUsed(keyId) {
     this._ensureOpen();
-    await idbDelete(this._db, 'oneTimePreKeys', keyId);
+    await this._runtime.markOneTimePreKeyUsed(keyId);
   }
 
   async getMaxOTPKeyId() {
     this._ensureOpen();
-    const keys = await idbGetAllKeys(this._db, 'oneTimePreKeys');
-    if (keys.length === 0) return 0;
-    let max = keys[0];
-    for (let i = 1; i < keys.length; i++) {
-      if (keys[i] > max) max = keys[i];
-    }
-    return max;
+    return this._runtime.getMaxOTPKeyId();
   }
 
   // -------------------------------------------------------------------------
@@ -299,26 +150,22 @@ export class KeyStore {
 
   async saveSession(userId, sessionState) {
     this._ensureOpen();
-    const encrypted = encryptValue(this._masterKey, sessionState, 'sessions', userId);
-    await idbPut(this._db, 'sessions', userId, encrypted);
+    await this._runtime.saveSession(userId, sessionState);
   }
 
   async getSession(userId) {
     this._ensureOpen();
-    const encrypted = await idbGet(this._db, 'sessions', userId);
-    if (!encrypted) return null;
-    return decryptValue(this._masterKey, encrypted, 'sessions', userId);
+    return this._runtime.getSession(userId);
   }
 
   async hasSession(userId) {
     this._ensureOpen();
-    const encrypted = await idbGet(this._db, 'sessions', userId);
-    return encrypted !== null;
+    return this._runtime.hasSession(userId);
   }
 
   async deleteSession(userId) {
     this._ensureOpen();
-    await idbDelete(this._db, 'sessions', userId);
+    await this._runtime.deleteSession(userId);
   }
 
   // -------------------------------------------------------------------------
@@ -327,36 +174,17 @@ export class KeyStore {
 
   async saveSenderKey(groupId, senderUserId, senderKeyState) {
     this._ensureOpen();
-    const key = `${groupId}:${senderUserId}`;
-    const encrypted = encryptValue(this._masterKey, senderKeyState, 'senderKeys', key);
-    await idbPut(this._db, 'senderKeys', key, encrypted);
+    await this._runtime.saveSenderKey(groupId, senderUserId, senderKeyState);
   }
 
   async getSenderKey(groupId, senderUserId) {
     this._ensureOpen();
-    const key = `${groupId}:${senderUserId}`;
-    const encrypted = await idbGet(this._db, 'senderKeys', key);
-    if (!encrypted) return null;
-    return decryptValue(this._masterKey, encrypted, 'senderKeys', key);
+    return this._runtime.getSenderKey(groupId, senderUserId);
   }
 
   async deleteSenderKeysForGroup(groupId) {
     this._ensureOpen();
-    const keys = await idbGetAllKeys(this._db, 'senderKeys');
-    const prefix = groupId + ':';
-    const toDelete = keys.filter(k => typeof k === 'string' && k.startsWith(prefix));
-    if (toDelete.length === 0) return;
-    // Use a single transaction for atomicity
-    await new Promise((resolve, reject) => {
-      const tx = this._db.transaction('senderKeys', 'readwrite');
-      const store = tx.objectStore('senderKeys');
-      for (const key of toDelete) {
-        store.delete(key);
-      }
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error);
-      tx.onabort = () => reject(tx.error);
-    });
+    await this._runtime.deleteSenderKeysForGroup(groupId);
   }
 
   // -------------------------------------------------------------------------
@@ -365,15 +193,12 @@ export class KeyStore {
 
   async saveTrustedIdentity(userId, identityData) {
     this._ensureOpen();
-    const encrypted = encryptValue(this._masterKey, identityData, 'trustedIdentities', userId);
-    await idbPut(this._db, 'trustedIdentities', userId, encrypted);
+    await this._runtime.saveTrustedIdentity(userId, identityData);
   }
 
   async getTrustedIdentity(userId) {
     this._ensureOpen();
-    const encrypted = await idbGet(this._db, 'trustedIdentities', userId);
-    if (!encrypted) return null;
-    return decryptValue(this._masterKey, encrypted, 'trustedIdentities', userId);
+    return this._runtime.getTrustedIdentity(userId);
   }
 
   /**
@@ -383,13 +208,8 @@ export class KeyStore {
    * @returns {'trusted' | 'new' | 'key_changed'}
    */
   async checkIdentityTrust(userId, identityKeyPublicBase64) {
-    const stored = await this.getTrustedIdentity(userId);
-    if (!stored) return 'new';
-    // Use constant-time comparison to prevent timing side-channel
-    const storedBytes = fromBase64(stored.identityKeyPublic);
-    const incomingBytes = fromBase64(identityKeyPublicBase64);
-    if (constantTimeEqual(storedBytes, incomingBytes)) return 'trusted';
-    return 'key_changed';
+    this._ensureOpen();
+    return this._runtime.checkIdentityTrust(userId, identityKeyPublicBase64);
   }
 
   /**
@@ -397,35 +217,16 @@ export class KeyStore {
    * @returns {{ trusted: boolean, keyChanged: boolean }}
    */
   async tofuVerify(userId, identityKeyPublicBase64) {
-    const status = await this.checkIdentityTrust(userId, identityKeyPublicBase64);
-
-    if (status === 'new') {
-      await this.saveTrustedIdentity(userId, {
-        identityKeyPublic: identityKeyPublicBase64,
-        firstSeen: Date.now(),
-        verified: false,
-      });
-      return { trusted: true, keyChanged: false };
-    }
-
-    if (status === 'trusted') {
-      return { trusted: true, keyChanged: false };
-    }
-
-    // key_changed — do NOT auto-trust, flag for user
-    return { trusted: false, keyChanged: true };
+    this._ensureOpen();
+    return this._runtime.tofuVerify(userId, identityKeyPublicBase64);
   }
 
   /**
    * Manually verify (or re-trust) a user's identity after safety number comparison.
    */
   async markVerified(userId, identityKeyPublicBase64) {
-    const existing = await this.getTrustedIdentity(userId);
-    await this.saveTrustedIdentity(userId, {
-      identityKeyPublic: identityKeyPublicBase64,
-      firstSeen: existing?.firstSeen ?? Date.now(),
-      verified: true,
-    });
+    this._ensureOpen();
+    await this._runtime.markVerified(userId, identityKeyPublicBase64);
   }
 
   // -------------------------------------------------------------------------
@@ -434,9 +235,7 @@ export class KeyStore {
 
   async clear() {
     this._ensureOpen();
-    for (const storeName of STORES) {
-      await idbClearStore(this._db, storeName);
-    }
+    await this._runtime.clear();
   }
 }
 

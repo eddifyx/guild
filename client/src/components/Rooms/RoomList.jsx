@@ -1,4 +1,4 @@
-import { memo, useState, useEffect, useRef } from 'react';
+import React, { memo, useState, useEffect, useRef } from 'react';
 import { useAuth } from '../../contexts/AuthContext';
 
 function RoomList({ rooms, myRooms, activeId, onSelect, onRename, onDelete, unreadCounts }) {
@@ -74,7 +74,7 @@ function RoomList({ rooms, myRooms, activeId, onSelect, onRename, onDelete, unre
               if (e.key === 'Escape') setRenaming(null);
             }}
             onBlur={submitRename}
-            maxLength={50}
+            maxLength={100}
             style={{
               width: '100%',
               padding: '6px 10px',
@@ -102,7 +102,7 @@ function RoomList({ rooms, myRooms, activeId, onSelect, onRename, onDelete, unre
         style={{
           display: 'flex',
           alignItems: 'center',
-          gap: 8,
+          gap: 6,
           width: '100%',
           padding: '7px 12px',
           border: 'none',
@@ -130,14 +130,6 @@ function RoomList({ rooms, myRooms, activeId, onSelect, onRename, onDelete, unre
           }
         }}
       >
-        <span style={{
-          fontSize: 12,
-          fontWeight: 500,
-          color: isActive ? 'var(--accent)' : 'var(--text-muted)',
-          flexShrink: 0,
-        }}>
-          #
-        </span>
         <span className="truncate" style={{ flex: 1 }}>{room.name}</span>
         {unreadCounts?.[room.id] > 0 && !isActive && (
           <span style={{

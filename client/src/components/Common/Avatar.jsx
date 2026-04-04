@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 
 export default function Avatar({ username, color, size = 36, profilePicture }) {
   const [imgFailed, setImgFailed] = useState(false);

@@ -1,9 +1,7 @@
-import { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useVoiceContext } from '../../contexts/VoiceContext';
-import { useAuth } from '../../contexts/AuthContext';
 import AudioSettings from './AudioSettings';
 import SourcePicker from '../Stream/SourcePicker';
-import Modal from '../Common/Modal';
 import { startPerfTrace } from '../../utils/devPerf';
 
 export default function VoiceControls() {
@@ -14,24 +12,16 @@ export default function VoiceControls() {
     toggleMute,
     toggleDeafen,
     leaveChannel,
-    voiceChannels,
     screenSharing,
-    startScreenShare,
     stopScreenShare,
     showSourcePicker,
     confirmScreenShare,
     cancelSourcePicker,
     screenShareError,
     clearScreenShareError,
-    voiceE2E,
-    e2eWarning,
   } = useVoiceContext();
-  const { user } = useAuth();
   const [showSettings, setShowSettings] = useState(false);
   const [audioSettingsOpenTraceId, setAudioSettingsOpenTraceId] = useState(null);
-  const [shareError, setShareError] = useState(null);
-  const [screenCaptureAccessStatus, setScreenCaptureAccessStatus] = useState(null);
-  const showScreenCapturePermissionPrompt = /screen recording/i.test(screenShareError || '');
   const closeSettings = useCallback(() => {
     setShowSettings(false);
     setAudioSettingsOpenTraceId(null);
@@ -44,108 +34,12 @@ export default function VoiceControls() {
   }, []);
 
   useEffect(() => {
-    if (!shareError) return;
-    const t = setTimeout(() => setShareError(null), 4000);
-    return () => clearTimeout(t);
-  }, [shareError]);
-
-  useEffect(() => {
-    if (!screenShareError || showScreenCapturePermissionPrompt) return;
+    if (!screenShareError) return;
     const t = setTimeout(() => clearScreenShareError(), 4000);
     return () => clearTimeout(t);
-  }, [screenShareError, showScreenCapturePermissionPrompt, clearScreenShareError]);
-
-  useEffect(() => {
-    if (!showScreenCapturePermissionPrompt) {
-      setScreenCaptureAccessStatus(null);
-      return;
-    }
-
-    let cancelled = false;
-
-    const readScreenCaptureAccessStatus = async () => {
-      try {
-        const status = await window.electronAPI?.getScreenCaptureAccessStatus?.();
-        if (!cancelled) {
-          setScreenCaptureAccessStatus(status || 'unknown');
-        }
-      } catch {
-        if (!cancelled) {
-          setScreenCaptureAccessStatus('unknown');
-        }
-      }
-    };
-
-    const handleWindowFocus = () => {
-      readScreenCaptureAccessStatus();
-    };
-
-    const handleVisibilityChange = () => {
-      if (document.visibilityState === 'visible') {
-        readScreenCaptureAccessStatus();
-      }
-    };
-
-    readScreenCaptureAccessStatus();
-    window.addEventListener('focus', handleWindowFocus);
-    document.addEventListener('visibilitychange', handleVisibilityChange);
-
-    return () => {
-      cancelled = true;
-      window.removeEventListener('focus', handleWindowFocus);
-      document.removeEventListener('visibilitychange', handleVisibilityChange);
-    };
-  }, [showScreenCapturePermissionPrompt]);
-
-  const handleStartShare = useCallback(async () => {
-    const channel = voiceChannels.find(ch => ch.id === channelId);
-    const otherStreamer = channel?.participants?.find(p => p.screenSharing && p.userId !== user.userId);
-    if (otherStreamer) {
-      setShareError(`${otherStreamer.username} is currently streaming. Only 1 stream can be active at a time.`);
-      return;
-    }
-    setShareError(null);
-    clearScreenShareError();
-    try {
-      await startScreenShare();
-    } catch (err) {
-      setShareError(err?.message || 'Secure screen sharing is unavailable right now.');
-    }
-  }, [voiceChannels, channelId, user.userId, startScreenShare, clearScreenShareError]);
+  }, [screenShareError, clearScreenShareError]);
 
   if (!channelId) return null;
-
-  const channel = voiceChannels.find(ch => ch.id === channelId);
-  const channelName = channel?.name || 'Voice';
-  const secureVoiceState = e2eWarning
-    ? 'blocked'
-    : voiceE2E
-      ? 'ready'
-      : 'establishing';
-  const secureVoiceColor = secureVoiceState === 'blocked'
-    ? 'var(--danger)'
-    : secureVoiceState === 'ready'
-      ? 'var(--success)'
-      : 'var(--accent)';
-  const secureVoiceLabel = secureVoiceState === 'blocked'
-    ? 'Secure Media Blocked'
-    : secureVoiceState === 'ready'
-      ? 'Secure Voice Connected'
-      : 'Establishing Secure Voice';
-  const activeShareError = shareError || screenShareError;
-  const hasGrantedScreenCapture = screenCaptureAccessStatus === 'granted';
-  const canOpenScreenCaptureSettings = typeof window !== 'undefined'
-    && typeof window.electronAPI?.openScreenCaptureSettings === 'function';
-  const canRestartApp = typeof window !== 'undefined'
-    && typeof window.electronAPI?.restartApp === 'function';
-
-  const handleOpenScreenCaptureSettings = () => {
-    window.electronAPI?.openScreenCaptureSettings?.().catch?.(() => {});
-  };
-
-  const handleRestartApp = () => {
-    window.electronAPI?.restartApp?.().catch?.(() => {});
-  };
 
   const controlBtn = (onClick, title, isActive, isDanger, icon) => (
     <button
@@ -169,46 +63,29 @@ export default function VoiceControls() {
     </button>
   );
 
+  const shareButtonTitle = screenSharing ? 'Stop sharing' : 'Screen Sharing Coming Soon™';
+  const shareButtonHandler = screenSharing ? stopScreenShare : undefined;
+  const shareButtonActive = screenSharing;
+  const shareButtonStyle = !screenSharing ? {
+    color: 'rgba(255, 255, 255, 0.35)',
+    cursor: 'not-allowed',
+    opacity: 0.72,
+  } : null;
+
   return (
     <>
       <div style={{
-        padding: '10px 12px',
+        padding: '8px 10px',
         borderTop: '1px solid var(--border)',
         background: 'var(--bg-tertiary)',
         WebkitAppRegion: 'no-drag',
       }}>
-        <div style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 6,
-          marginBottom: 8,
-          fontSize: 11,
-        }}>
-          <div style={{
-            width: 6,
-            height: 6,
-            borderRadius: '50%',
-            background: secureVoiceColor,
-            boxShadow: secureVoiceState === 'ready'
-              ? '0 0 6px rgba(0, 214, 143, 0.4)'
-              : secureVoiceState === 'blocked'
-                ? '0 0 6px rgba(255, 71, 87, 0.4)'
-                : '0 0 6px rgba(64, 255, 64, 0.25)',
-          }} />
-          <span style={{ color: secureVoiceColor, fontWeight: 600 }}>
-            {secureVoiceLabel}
-          </span>
-          <span style={{ color: 'var(--text-muted)', marginLeft: 'auto', fontSize: 10 }} className="truncate">
-            {channelName}
-          </span>
-        </div>
-
         {screenSharing && (
           <div style={{
             display: 'flex',
             alignItems: 'center',
             gap: 6,
-            marginBottom: 8,
+            marginBottom: 6,
             fontSize: 11,
           }}>
             <div style={{
@@ -221,7 +98,7 @@ export default function VoiceControls() {
           </div>
         )}
 
-        {e2eWarning && (
+        {screenShareError && (
           <div style={{
             marginBottom: 6,
             padding: '5px 8px',
@@ -231,21 +108,7 @@ export default function VoiceControls() {
             color: 'var(--danger)',
             lineHeight: 1.4,
           }}>
-            {e2eWarning}
-          </div>
-        )}
-
-        {activeShareError && !showScreenCapturePermissionPrompt && (
-          <div style={{
-            marginBottom: 6,
-            padding: '5px 8px',
-            background: 'rgba(255, 71, 87, 0.1)',
-            borderRadius: 4,
-            fontSize: 10,
-            color: 'var(--danger)',
-            lineHeight: 1.4,
-          }}>
-            <div>{activeShareError}</div>
+            <div>{screenShareError}</div>
           </div>
         )}
 
@@ -294,16 +157,32 @@ export default function VoiceControls() {
             </svg>
           )}
 
-          {controlBtn(
-            screenSharing ? stopScreenShare : handleStartShare,
-            screenSharing ? 'Stop sharing' : 'Share screen',
-            screenSharing, false,
+          <button
+            onClick={shareButtonHandler}
+            title={shareButtonTitle}
+            aria-disabled={!screenSharing}
+            style={{
+              flex: 1,
+              padding: '7px 0',
+              background: shareButtonActive ? 'var(--accent)' : 'var(--bg-tertiary)',
+              border: 'none',
+              borderRadius: 4,
+              color: shareButtonActive ? '#fff' : 'var(--text-muted)',
+              cursor: screenSharing ? 'pointer' : 'not-allowed',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              transition: 'all 0.15s',
+              opacity: screenSharing ? 1 : 0.72,
+              ...(shareButtonStyle || {}),
+            }}
+          >
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <rect x="2" y="3" width="20" height="14" rx="2" ry="2" />
               <line x1="8" y1="21" x2="16" y2="21" />
               <line x1="12" y1="17" x2="12" y2="21" />
             </svg>
-          )}
+          </button>
 
           {controlBtn(leaveChannel, 'Disconnect', false, true,
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -317,87 +196,6 @@ export default function VoiceControls() {
 
       {showSettings && <AudioSettings onClose={closeSettings} openTraceId={audioSettingsOpenTraceId} />}
       {showSourcePicker && <SourcePicker onSelect={confirmScreenShare} onClose={cancelSourcePicker} />}
-      {showScreenCapturePermissionPrompt && (
-        <Modal onClose={clearScreenShareError} title="Enable Screen Recording">
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-            <div style={{ fontSize: 13, color: 'var(--text-secondary)', lineHeight: 1.6 }}>
-              {hasGrantedScreenCapture
-                ? 'Screen Recording is now enabled for `/guild`. Restart the app once so macOS can finish applying the change before trying screen share again.'
-                : 'macOS is blocking screen capture for `/guild`. Turn on access in Apple&apos;s privacy settings. After you enable it, restart the app before trying screen share again.'}
-            </div>
-            <div style={{
-              padding: '12px 14px',
-              borderRadius: 10,
-              border: '1px solid var(--border)',
-              background: 'rgba(255, 255, 255, 0.03)',
-              fontSize: 12,
-              color: 'var(--text-muted)',
-              lineHeight: 1.6,
-            }}>
-              System Settings &gt; Privacy &amp; Security &gt; Screen &amp; System Audio Recording
-            </div>
-            <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
-              <button
-                type="button"
-                onClick={clearScreenShareError}
-                style={{
-                  padding: '8px 12px',
-                  borderRadius: 8,
-                  border: '1px solid var(--border)',
-                  background: 'transparent',
-                  color: 'var(--text-secondary)',
-                  cursor: 'pointer',
-                  fontSize: 12,
-                  fontFamily: "'Geist', sans-serif",
-                }}
-              >
-                Not Now
-              </button>
-              {hasGrantedScreenCapture ? (
-                <button
-                  type="button"
-                  onClick={handleRestartApp}
-                  disabled={!canRestartApp}
-                  style={{
-                    padding: '8px 12px',
-                    borderRadius: 8,
-                    border: 'none',
-                    background: 'var(--accent)',
-                    color: '#050705',
-                    cursor: canRestartApp ? 'pointer' : 'default',
-                    fontSize: 12,
-                    fontWeight: 700,
-                    fontFamily: "'Geist', sans-serif",
-                    opacity: canRestartApp ? 1 : 0.6,
-                  }}
-                >
-                  Restart /guild
-                </button>
-              ) : (
-                <button
-                  type="button"
-                  onClick={handleOpenScreenCaptureSettings}
-                  disabled={!canOpenScreenCaptureSettings}
-                  style={{
-                    padding: '8px 12px',
-                    borderRadius: 8,
-                    border: 'none',
-                    background: 'var(--accent)',
-                    color: '#050705',
-                    cursor: canOpenScreenCaptureSettings ? 'pointer' : 'default',
-                    fontSize: 12,
-                    fontWeight: 700,
-                    fontFamily: "'Geist', sans-serif",
-                    opacity: canOpenScreenCaptureSettings ? 1 : 0.6,
-                  }}
-                >
-                  Open System Settings
-                </button>
-              )}
-            </div>
-          </div>
-        </Modal>
-      )}
     </>
   );
 }

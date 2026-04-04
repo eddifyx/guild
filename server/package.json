@@ -5,6 +5,7 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "nodemon src/index.js",
+    "test:stabilization": "node ../scripts/run-stabilization-tests.mjs",
     "dev:empty": "SEED_DEFAULT_GUILD=0 DB_PATH=./data/messenger-dev-empty.db nodemon src/index.js",
     "predev": "node scripts/ensureBetterSqlite3.js",
     "prestart": "node scripts/ensureBetterSqlite3.js",

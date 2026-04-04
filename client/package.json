@@ -1,7 +1,7 @@
 {
   "name": "guild",
   "productName": "guild",
-  "version": "1.0.41",
+  "version": "1.0.72",
   "private": true,
   "description": "/guild encrypted messenger",
   "author": "/guild",
@@ -10,9 +10,17 @@
     "start": "electron-forge start",
     "package": "electron-forge package",
     "make": "electron-forge make",
+    "test:stabilization": "node ../scripts/run-stabilization-tests.mjs",
     "make:mac-release": "GUILD_MAC_SIGN=1 electron-forge make --platform=darwin --arch=arm64",
     "make:mac-dmg": "bash scripts/build-mac-dmg.sh",
-    "verify:mac-release": "node scripts/verify-mac-release-env.js"
+    "create:release-proof": "python3 ../scripts/create-release-proof.py",
+    "verify:mac-release": "node scripts/verify-mac-release-env.js",
+    "verify:client-version": "node ../scripts/validate-client-version.mjs ../server/client-version.json",
+    "verify:release-proof": "python3 ../scripts/validate-release-proof.py",
+    "verify:packaged-runtime": "bash ../scripts/validate-packaged-runtime.sh",
+    "verify:mac-update-zip": "bash ../scripts/validate-mac-update-zip.sh",
+    "verify:windows-update-zip": "bash ../scripts/validate-windows-update-zip.sh",
+    "verify:lane-markers": "bash ../scripts/verify-lane-markers.sh"
   },
   "dependencies": {
     "@noble/ciphers": "^1.2.0",

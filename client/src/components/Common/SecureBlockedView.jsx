@@ -1,3 +1,4 @@
+import React from 'react';
 const spinnerStyle = {
   width: 28,
   height: 28,

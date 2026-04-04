@@ -1,6 +1,7 @@
 import { useState, useCallback, useMemo } from 'react';
 import { api } from '../api';
 import { rememberUsers } from '../crypto/identityDirectory.js';
+import { stripUniversalGuildChatPermissions } from '../features/guild/capabilities';
 
 export function useGuilds() {
   const [publicGuilds, setPublicGuilds] = useState([]);
@@ -101,16 +102,24 @@ export function useGuilds() {
   }, []);
 
   const createRank = useCallback(async (guildId, { name, permissions }) => {
+    const payload = { name };
+    if (permissions !== undefined) {
+      payload.permissions = stripUniversalGuildChatPermissions(permissions);
+    }
     return api(`/api/guilds/${guildId}/ranks`, {
       method: 'POST',
-      body: JSON.stringify({ name, permissions }),
+      body: JSON.stringify(payload),
     });
   }, []);
 
   const updateRank = useCallback(async (guildId, rankId, { name, permissions }) => {
+    const payload = { name };
+    if (permissions !== undefined) {
+      payload.permissions = stripUniversalGuildChatPermissions(permissions);
+    }
     await api(`/api/guilds/${guildId}/ranks/${rankId}`, {
       method: 'PUT',
-      body: JSON.stringify({ name, permissions }),
+      body: JSON.stringify(payload),
     });
   }, []);
 
@@ -134,7 +143,7 @@ export function useGuilds() {
   const updateMemberPermissions = useCallback(async (guildId, userId, overrides) => {
     await api(`/api/guilds/${guildId}/members/${userId}/permissions`, {
       method: 'PUT',
-      body: JSON.stringify({ overrides }),
+      body: JSON.stringify({ overrides: stripUniversalGuildChatPermissions(overrides) }),
     });
   }, []);
 

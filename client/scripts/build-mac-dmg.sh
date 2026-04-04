@@ -3,13 +3,44 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 CLIENT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+NODE_RUNNER="$(command -v node || true)"
 
-APP_PATH="$CLIENT_DIR/out/guild-darwin-arm64/guild.app"
+if [[ -z "$NODE_RUNNER" ]]; then
+  ELECTRON_NODE="$CLIENT_DIR/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron"
+  if [[ -x "$ELECTRON_NODE" ]]; then
+    NODE_RUNNER="$ELECTRON_NODE"
+    export ELECTRON_RUN_AS_NODE=1
+  fi
+fi
+
+if [[ -z "$NODE_RUNNER" ]]; then
+  echo "No Node-compatible runtime found for flavor resolution" >&2
+  exit 1
+fi
+
+read -r DEFAULT_PACKAGE_DIR DEFAULT_APP_BUNDLE DEFAULT_BACKGROUND_PATH DEFAULT_ICON_PATH <<EOF
+$("$NODE_RUNNER" - "$CLIENT_DIR" <<'NODE'
+const path = require('path');
+const clientDir = process.argv[2];
+const { getAppFlavor, resolveFlavorAsset } = require(path.join(clientDir, 'config', 'appFlavor.js'));
+const flavor = getAppFlavor(process.env.GUILD_APP_FLAVOR);
+
+process.stdout.write([
+  `${flavor.packageDirName}-darwin-arm64`,
+  flavor.appBundleName,
+  resolveFlavorAsset(clientDir, flavor, 'dmg-background', '.png'),
+  resolveFlavorAsset(clientDir, flavor, 'icon', '.icns'),
+].join('\t'));
+NODE
+)
+EOF
+
+APP_PATH="$CLIENT_DIR/out/$DEFAULT_PACKAGE_DIR/$DEFAULT_APP_BUNDLE"
 OUTPUT_PATH=""
 VOLUME_NAME=""
-BACKGROUND_PATH="$CLIENT_DIR/assets/dmg-background.png"
+BACKGROUND_PATH="$DEFAULT_BACKGROUND_PATH"
 APPLICATIONS_PATH="/Applications"
-ICON_PATH="$CLIENT_DIR/assets/icon.icns"
+ICON_PATH="$DEFAULT_ICON_PATH"
 
 usage() {
   cat <<'EOF'

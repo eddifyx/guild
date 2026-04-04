@@ -1,3 +1,4 @@
+import React from 'react';
 import { useOnlineUsers } from '../../hooks/useOnlineUsers';
 
 export default function Header({ conversation, conversationName }) {

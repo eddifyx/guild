@@ -1,0 +1,61 @@
+import { buildVoiceScreenShareActionOptions } from './voiceControllerBindings.mjs';
+
+export function buildVoiceScreenShareActionContract({
+  refs = {},
+  runtime = {},
+  constants = {},
+  getPlatformFn = () => null,
+  runVoiceScreenShareStartFlowFn = async () => {},
+} = {}) {
+  return buildVoiceScreenShareActionOptions({
+    refs: {
+      channelIdRef: refs.channelIdRef,
+      participantIdsRef: refs.participantIdsRef,
+      deviceRef: refs.deviceRef,
+      screenShareRefs: {
+        screenShareStreamRef: refs.screenShareStreamRef,
+        screenShareProducerRef: refs.screenShareProducerRef,
+        screenShareAudioProducerRef: refs.screenShareAudioProducerRef,
+        screenShareSimulcastEnabledRef: refs.screenShareSimulcastEnabledRef,
+      },
+    },
+    runtime: {
+      ensureSecureMediaReadyFn: runtime.ensureSecureMediaReadyFn,
+      ensureVoiceKeyForParticipantsFn: runtime.ensureVoiceKeyForParticipantsFn,
+      getOrCreateScreenSendTransportFn: runtime.getOrCreateScreenSendTransportFn,
+      getRuntimeScreenShareCodecModeFn: runtime.getRuntimeScreenShareCodecModeFn,
+      getPreferredScreenShareCodecCandidatesFn: runtime.getPreferredScreenShareCodecCandidatesFn,
+      resetScreenShareAdaptationFn: runtime.resetScreenShareAdaptationFn,
+      applyPreferredScreenShareConstraintsFn: runtime.applyPreferredScreenShareConstraintsFn,
+      setShowSourcePickerFn: runtime.setShowSourcePickerFn,
+      setScreenShareStreamFn: runtime.setScreenShareStreamFn,
+      setScreenShareDiagnosticsFn: runtime.setScreenShareDiagnosticsFn,
+      setVoiceE2EFn: runtime.setVoiceE2EFn,
+      setE2EWarningFn: runtime.setE2EWarningFn,
+      setScreenShareErrorFn: runtime.setScreenShareErrorFn,
+      setScreenSharingFn: runtime.setScreenSharingFn,
+      playStreamStartChimeFn: runtime.playStreamStartChimeFn,
+      cleanupVoiceScreenShareSessionFn: runtime.cleanupVoiceScreenShareSessionFn,
+      publishScreenShareVideoProducerFn: runtime.publishScreenShareVideoProducerFn,
+      applySenderPreferencesFn: runtime.applySenderPreferencesFn,
+      attachSenderEncryptionFn: runtime.attachSenderEncryptionFn,
+      socket: runtime.socket,
+      onVideoTrackEndedFn: runtime.onVideoTrackEndedFn,
+      buildScreenShareStartErrorFn: runtime.buildScreenShareStartErrorFn,
+      logScreenShareFailureContextFn: runtime.logScreenShareFailureContextFn,
+      summarizeSelectedCodecFn: runtime.summarizeSelectedCodecFn,
+      summarizeTrackSnapshotFn: runtime.summarizeTrackSnapshotFn,
+      summarizeScreenShareProfileFn: runtime.summarizeScreenShareProfileFn,
+      summarizeScreenShareHardwareFn: runtime.summarizeScreenShareHardwareFn,
+      summarizeSenderParametersFn: runtime.summarizeSenderParametersFn,
+      getScreenShareRequestedCaptureFn: runtime.getScreenShareRequestedCaptureFn,
+    },
+    constants: {
+      screenShareProfiles: constants.screenShareProfiles,
+      initialProfileIndex: constants.initialProfileIndex,
+      screenShareAudioMaxBitrate: constants.screenShareAudioMaxBitrate,
+    },
+    getPlatformFn,
+    runVoiceScreenShareStartFlowFn,
+  });
+}
